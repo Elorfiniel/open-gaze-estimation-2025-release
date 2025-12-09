@@ -330,3 +330,112 @@ class AFFNet(DataFnMixin, BaseModule):
     gaze = self.fc(feat)
 
     return gaze
+
+
+@MODELS.register_module()
+class AFFNetD(DataFnMixin, BaseModule):
+  '''A variant of AFFNet that predicts PoGs for both eyes.
+
+  Input:
+    - face crop, shape: (B, 3, 224, 224)
+    - reye crop, shape: (B, 3, 112, 112), flip: false
+    - leye crop, shape: (B, 3, 112, 112), flip: false
+    - crop rect, shape: (B, 12)
+
+  Output:
+    - reye PoG (gx, gy), shape: (B, 2)
+    - leye PoG (gx, gy), shape: (B, 2)
+  '''
+
+  def __init__(self, init_cfg: dict = None):
+    super(AFFNetD, self).__init__(init_cfg=init_cfg)
+
+    self.face = _AFFNetFace()
+
+    self.rect = nn.Sequential(
+      nn.Linear(12, 64),
+      nn.LeakyReLU(inplace=True),
+      nn.Linear(64, 96),
+      nn.LeakyReLU(inplace=True),
+      nn.Linear(96, 128),
+      nn.LeakyReLU(inplace=True),
+      nn.Linear(128, 64),
+      nn.LeakyReLU(inplace=True),
+    )
+
+    self.eyes = _AFFNetEyes()
+
+    self.reye_m_1 = nn.Sequential(
+      _AFFNetSELayer(128, 16),
+      nn.Conv2d(128, 64, kernel_size=3, stride=2, padding=1),
+    )
+    self.reye_m_2 = nn.Sequential(
+      nn.ReLU(inplace=True),
+      _AFFNetSELayer(64, 16),
+    )
+    self.reye_ada = _AFFNetAdaGN(128, 8, 64)
+
+    self.reye_fc = nn.Sequential(
+      nn.Linear(64*5*5, 128),
+      nn.LeakyReLU(inplace=True),
+    )
+
+    self.leye_m_1 = nn.Sequential(
+      _AFFNetSELayer(128, 16),
+      nn.Conv2d(128, 64, kernel_size=3, stride=2, padding=1),
+    )
+    self.leye_m_2 = nn.Sequential(
+      nn.ReLU(inplace=True),
+      _AFFNetSELayer(64, 16),
+    )
+    self.leye_ada = _AFFNetAdaGN(128, 8, 64)
+
+    self.leye_fc = nn.Sequential(
+      nn.Linear(64*5*5, 128),
+      nn.LeakyReLU(inplace=True),
+    )
+
+    self.reye_gaze = nn.Sequential(
+      nn.Linear(64+64+128, 128),
+      nn.LeakyReLU(inplace=True),
+      nn.Linear(128, 2),
+    )
+    self.leye_gaze = nn.Sequential(
+      nn.Linear(64+64+128, 128),
+      nn.LeakyReLU(inplace=True),
+      nn.Linear(128, 2),
+    )
+
+  def data_fn(self, data_dict: dict):
+    return dict(
+      face=data_dict['face'], rect=data_dict['rect'],
+      reye=data_dict['reye'], leye=data_dict['leye'],
+    )
+
+  def forward(self, face: torch.Tensor, rect: torch.Tensor,
+              reye: torch.Tensor, leye: torch.Tensor):
+    feat_face = self.face(face)
+    feat_rect = self.rect(rect)
+
+    factor = torch.cat([feat_face, feat_rect], dim=1)
+
+    feat_reye = self.eyes(reye, factor)
+    feat_reye = self.reye_m_1(feat_reye)
+    feat_reye = self.reye_ada(feat_reye, factor)
+    feat_reye = self.reye_m_2(feat_reye)
+    feat_reye = torch.flatten(feat_reye, start_dim=1)
+    feat_reye = self.reye_fc(feat_reye)
+
+    feat_leye = self.eyes(leye, factor)
+    feat_leye = self.leye_m_1(feat_leye)
+    feat_leye = self.leye_ada(feat_leye, factor)
+    feat_leye = self.leye_m_2(feat_leye)
+    feat_leye = torch.flatten(feat_leye, start_dim=1)
+    feat_leye = self.leye_fc(feat_leye)
+
+    feat_reye = torch.cat([feat_face, feat_reye, feat_rect], dim=1)
+    reye_gaze = self.reye_gaze(feat_reye)
+    feat_leye = torch.cat([feat_face, feat_leye, feat_rect], dim=1)
+    leye_gaze = self.leye_gaze(feat_leye)
+
+    return reye_gaze, leye_gaze

@@ -1,0 +1,5 @@
+# ignore model files
+*.pth
+*.pt
+*.ckpt
+*.onnx

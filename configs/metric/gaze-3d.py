@@ -1,0 +1,1 @@
+AngularError = dict(type='AngularError')

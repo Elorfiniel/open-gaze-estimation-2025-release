@@ -1,0 +1,49 @@
+{
+  "model": {
+    "backbone": "fastvit-sa12",
+    "fusion": "adaptive",
+    "reg_head": "multi-task",
+    "n_face_kpts": 151,
+    "n_eyes_kpts": 110
+  },
+  "pre_process": {
+    "image_size": [224, 224],
+    "bbox_scale": 1.1,
+    "norm_mean": [0.485, 0.456, 0.406],
+    "norm_std": [0.229, 0.224, 0.225]
+  },
+  "post_process": {
+    "gaze_source": "gaze",
+    "epsilon": 1e-9,
+    "disp_margin": 80
+  },
+  "intrinsic": [
+    [1244.44, 0.0, 800.0],
+    [0.0, 1244.44, 800.0],
+    [0.0, 0.0, 1.0]
+  ],
+  "camera": {
+    "capture_id": 0,
+    "frame_h": 720,
+    "frame_w": 1280,
+    "intrinsic": [
+      [972.01, 0.0, 652.68],
+      [0.0, 972.35, 373.91],
+      [0.0, 0.0, 1.0]
+    ],
+    "extrinsic": [
+      [-1.0, 0.0, 0.0, 155.0],
+      [0.0, 1.0, 0.0, 5.0],
+      [0.0, 0.0, -1.0, 2.5]
+    ],
+    "distortion": [
+      0.123508, -0.334222, -0.002206, 0.000207, 0.199979
+    ]
+  },
+  "screen": {
+    "h_px": 1080,
+    "w_px": 1920,
+    "h_mm": 174.0,
+    "w_mm": 310.0
+  }
+}

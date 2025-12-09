@@ -3,6 +3,7 @@ from torchvision import transforms as tvt
 from opengaze.registry import TRANSFORMS
 
 from .base import BaseTransform
+from .image import RandomImageAugmentation
 
 
 TRANSFORMS.register_module(name='Grayscale', module=tvt.Grayscale)

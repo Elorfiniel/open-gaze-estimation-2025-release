@@ -26,19 +26,25 @@ from mmengine.registry import Registry
 # manage all kinds of runners like `EpochBasedRunner` and `IterBasedRunner`
 RUNNERS = Registry('runner', parent=MMENGINE_RUNNERS)
 # manage all kinds of loops like `EpochBasedTrainLoop`
-LOOPS = Registry('loop', parent=MMENGINE_LOOPS)
+LOOPS = Registry('loop', parent=MMENGINE_LOOPS, locations=['opengaze.engine.runner.loops'])
 # manage all kinds of hooks like `CheckpointHook`
 HOOKS = Registry('hook', parent=MMENGINE_HOOKS, locations=['opengaze.engine.hook'])
 
 # manage data-related modules
 DATASETS = Registry('dataset', parent=MMENGINE_DATASETS, locations=['opengaze.dataset'])
 DATA_SAMPLERS = Registry('data sampler', parent=MMENGINE_DATA_SAMPLERS)
-TRANSFORMS = Registry('transform', parent=MMENGINE_TRANSFORMS, locations=['opengaze.engine.transform'])
+TRANSFORMS = Registry(
+  'transform', parent=MMENGINE_TRANSFORMS,
+  locations=[
+    'opengaze.engine.transform',
+    'opengaze.transform',
+  ],
+)
 
 # mangage all kinds of modules inheriting `nn.Module`
 MODELS = Registry('model', parent=MMENGINE_MODELS, locations=['opengaze.model'])
 # manage all kinds of loss functions like `MSELoss`
-LOSSES = Registry('loss', locations=['opengaze.engine.evaluation.loss'])
+LOSSES = Registry('loss', locations=['opengaze.engine.loss'])
 
 # mangage all kinds of optimizers like `SGD` and `Adam`
 OPTIMIZERS = Registry('optimizer', parent=MMENGINE_OPTIMIZERS)
@@ -48,7 +54,7 @@ OPTIM_WRAPPERS = Registry('optim wrapper', parent=MMENGINE_OPTIM_WRAPPERS)
 PARAM_SCHEDULERS = Registry('parameter scheduler', parent=MMENGINE_PARAM_SCHEDULERS)
 
 # manage all kinds of metrics
-METRICS = Registry('metric', parent=MMENGINE_METRICS, locations=['opengaze.engine.evaluation.metric'])
+METRICS = Registry('metric', parent=MMENGINE_METRICS, locations=['opengaze.metric'])
 # manage evaluator
 EVALUATOR = Registry('evaluator', parent=MMENGINE_EVALUATOR)
 
