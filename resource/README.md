@@ -9,6 +9,7 @@ resource/
 │   ├── param-mean-std.pkl
 │   └── tddfa-v2-mb1.onnx
 ├── face-models/
+│   ├── ethxgaze-generic.txt
 │   └── mpiigaze-generic.mat
 └── mediapipe/
     ├── face_detection.tflite
@@ -24,6 +25,8 @@ You can download the external resources from the following links (please rename 
 - [3ddfa-v2/param-mean-std.pkl](https://github.com/cleardusk/3DDFA_V2/blob/master/configs/param_mean_std_62d_120x120.pkl): download the `param_mean_std_62d_120x120.pkl` file from 3DDFA-v2.
 
 - [3ddfa-v2/tddfa-v2-mb1.onnx](https://github.com/cleardusk/3DDFA_V2/tree/master/weights): download the pre-converted `mb1_120x120.onnx` file from 3DDFA-v2.
+
+- [face-models/ethxgaze-generic.txt](https://github.com/xucong-zhang/ETH-XGaze/blob/master/face_model.txt): download the `face_model.txt` file from ETH-XGaze dataset.
 
 - [face-models/mpiigaze-generic.mat](http://datasets.d2.mpi-inf.mpg.de/MPIIGaze/MPIIGaze.tar.gz): extract the `6 points-based face model.mat` file from MPIIGaze dataset.
 

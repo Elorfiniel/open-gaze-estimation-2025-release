@@ -11,6 +11,7 @@ import os.path as osp
 import torchvision.transforms.functional as F
 
 
+# Data Transformations
 @TRANSFORMS.register_module()
 class FaceGazeRandomHFlip(BaseTransform):
   def transform(self, data_dict: dict):
@@ -20,31 +21,47 @@ class FaceGazeRandomHFlip(BaseTransform):
     return data_dict
 
 
-FACE_GAZE_TRANSFORM = [
-  dict(type='ToTensor'),
-  dict(type='Normalize', mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-]
-FACE_GAZE_PIPELINE = [
-  dict(type='FaceGazeRandomHFlip'),
-]
-
-
+# Script Configuration
 def build_data_config_dict(opts: argparse.Namespace):
   # Dataset config
   dataset_kwargs = dict(
     type='FaceGazeDataset',
     data_name=opts.data_name,
     root=osp.join('data', opts.data_name),
-    transform=FACE_GAZE_TRANSFORM,
+    transform=[dict(type='ToTensor')],
   )
   train_dataset = dict(
     train=True, **dataset_kwargs,
-    pipeline=FACE_GAZE_PIPELINE,
+    pipeline=[
+      dict(type='FaceGazeRandomHFlip'),
+      dict(
+        type='RandomImageAugmentation',
+        image_data_key='face',
+        p=0.6, n_max_effective=4, drop_batch_dim=True,
+        normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        color_jiggle_kwargs=dict(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
+        random_gray_scale_kwargs=dict(p=0.4),
+        random_gaussian_blur_kwargs=dict(kernel_size=3, sigma=(0.1, 2.0), p=0.4),
+        random_motion_blur_kwargs=dict(kernel_size=3, angle=80.0, direction=0, p=0.4),
+        random_sharpness_kwargs=dict(sharpness=(0.1, 0.5), p=0.4),
+        random_gamma_kwargs=dict(gamma=(0.5, 2.0), gain=(0.9, 1.1), p=0.4),
+        random_posterize_kwargs=dict(bits=6, p=0.4),
+        random_jpeg_kwargs=dict(jpeg_quality=(20, 80), p=0.4),
+        random_planckian_jitter_kwargs=dict(p=0.4),
+      ),
+    ],
     subset=opts.train_subset,
   )
   test_dataset = dict(
     train=False, **dataset_kwargs,
-    pipeline=None, subset=opts.test_subset,
+    pipeline=[
+      dict(
+        type='RandomImageAugmentation',
+        image_data_key='face',
+        normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+      ),
+    ],
+    subset=opts.test_subset,
   )
 
   # Metric config
@@ -143,6 +160,7 @@ def build_config(opts: argparse.Namespace):
   return Config(config)
 
 
+# Entrypoint and Arguments
 def numeric_type(value):
   try:  # Parse a string as int or float
     if '.' in value or 'e' in value.lower():

@@ -6,7 +6,7 @@ from mmengine.runner import Runner
 from mmengine.runner.amp import autocast
 from mmengine.runner.loops import BaseLoop
 from torch.utils.data import DataLoader
-from typing import Dict, Sequence, Union
+from typing import Dict, List, Sequence, Union
 
 import logging
 import torch
@@ -30,7 +30,7 @@ class MultiSetValLoop(BaseLoop):
   def __init__(self,
                runner: Runner,
                dataloaders: Union[DataLoader, Dict, Sequence[Union[DataLoader, Dict]]],
-               evaluators: Union[Evaluator, Dict, Sequence[Union[Evaluator, Dict]]],
+               evaluators: Union[Evaluator, Dict, Sequence[Union[Evaluator, Dict, List]]],
                fp16: bool = False,
                **kwargs) -> None:
     self._runner = runner
@@ -46,7 +46,7 @@ class MultiSetValLoop(BaseLoop):
     if isinstance(evaluators, (Evaluator, Dict)):
       evaluators = [evaluators]
     for evaluator in evaluators:
-      assert isinstance(evaluator, (Evaluator, Dict)), (
+      assert isinstance(evaluator, (Evaluator, Dict, List)), (
         'each evaluator must be one of dict or Evaluator instance, '
         f'but got {type(evaluator)}.'
       )
@@ -72,8 +72,8 @@ class MultiSetValLoop(BaseLoop):
 
     return instance
 
-  def _build_evaluator(self, evaluator: Union[Evaluator, Dict]) -> Evaluator:
-    if isinstance(evaluator, Dict):
+  def _build_evaluator(self, evaluator: Union[Evaluator, Dict, List]) -> Evaluator:
+    if isinstance(evaluator, (Dict, List)):
       instance = self.runner.build_evaluator(evaluator)
     else:
       instance = evaluator
@@ -100,30 +100,24 @@ class MultiSetValLoop(BaseLoop):
     self.runner.call_hook('before_val')
     self.runner.model.eval()
 
-    metrics = dict()  # metrics for all dataloaders combined
+    cumulative_metrics = dict() # Collect metrics for all dataloaders combined
+
+    self.runner.call_hook('before_val_epoch')
+
     for ddx, (dataloader, evaluator) in enumerate(zip(self.dataloaders, self.evaluators)):
       dataloader = self._build_dataloader(dataloader)
       evaluator = self._build_evaluator(evaluator)
       self._propagate_update(dataloader, evaluator)
-
       print_log(
         f'Run validation for dataloader-{ddx + 1}.',
         logger='current', level=logging.INFO,
       )
-
-      self.runner.call_hook('before_val_epoch')
-
       for idx, data_batch in enumerate(dataloader):
         self.run_iter(idx, data_batch, evaluator)
+      metrics = evaluator.evaluate(len(dataloader.dataset))
+      cumulative_metrics.update(metrics)
 
-      curr_metrics = evaluator.evaluate(len(dataloader.dataset))
-      metrics_update_dict = {
-        f'dataloader-{ddx + 1}/{k}':v
-        for k, v in curr_metrics.items()
-      }
-      metrics.update(metrics_update_dict)
-
-      self.runner.call_hook('after_val_epoch', metrics=curr_metrics)
+    self.runner.call_hook('after_val_epoch', metrics=cumulative_metrics)
 
     self.runner.call_hook('after_val')
 
@@ -163,7 +157,7 @@ class MultiSetTestLoop(BaseLoop):
   def __init__(self,
                runner: Runner,
                dataloaders: Union[DataLoader, Dict, Sequence[Union[DataLoader, Dict]]],
-               evaluators: Union[Evaluator, Dict, Sequence[Union[Evaluator, Dict]]],
+               evaluators: Union[Evaluator, Dict, Sequence[Union[Evaluator, Dict, List]]],
                fp16: bool = False,
                **kwargs) -> None:
     self._runner = runner
@@ -179,7 +173,7 @@ class MultiSetTestLoop(BaseLoop):
     if isinstance(evaluators, (Evaluator, Dict)):
       evaluators = [evaluators]
     for evaluator in evaluators:
-      assert isinstance(evaluator, (Evaluator, Dict)), (
+      assert isinstance(evaluator, (Evaluator, Dict, List)), (
         'each evaluator must be one of dict or Evaluator instance, '
         f'but got {type(evaluator)}.'
       )
@@ -205,8 +199,8 @@ class MultiSetTestLoop(BaseLoop):
 
     return instance
 
-  def _build_evaluator(self, evaluator: Union[Evaluator, Dict]) -> Evaluator:
-    if isinstance(evaluator, Dict):
+  def _build_evaluator(self, evaluator: Union[Evaluator, Dict, List]) -> Evaluator:
+    if isinstance(evaluator, (Dict, List)):
       instance = self.runner.build_evaluator(evaluator)
     else:
       instance = evaluator
@@ -233,30 +227,24 @@ class MultiSetTestLoop(BaseLoop):
     self.runner.call_hook('before_test')
     self.runner.model.eval()
 
-    metrics = dict()  # metrics for all dataloaders combined
+    cumulative_metrics = dict() # Collect metrics for all dataloaders combined
+
+    self.runner.call_hook('before_test_epoch')
+
     for ddx, (dataloader, evaluator) in enumerate(zip(self.dataloaders, self.evaluators)):
       dataloader = self._build_dataloader(dataloader)
       evaluator = self._build_evaluator(evaluator)
       self._propagate_update(dataloader, evaluator)
-
       print_log(
         f'Run evaluation for dataloader-{ddx + 1}.',
         logger='current', level=logging.INFO,
       )
-
-      self.runner.call_hook('before_test_epoch')
-
       for idx, data_batch in enumerate(dataloader):
         self.run_iter(idx, data_batch, evaluator)
+      metrics = evaluator.evaluate(len(dataloader.dataset))
+      cumulative_metrics.update(metrics)
 
-      curr_metrics = evaluator.evaluate(len(dataloader.dataset))
-      metrics_update_dict = {
-        f'dataloader-{ddx + 1}/{k}':v
-        for k, v in curr_metrics.items()
-      }
-      metrics.update(metrics_update_dict)
-
-      self.runner.call_hook('after_test_epoch', metrics=curr_metrics)
+    self.runner.call_hook('after_test_epoch', metrics=cumulative_metrics)
 
     self.runner.call_hook('after_test')
 

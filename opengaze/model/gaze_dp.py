@@ -45,8 +45,11 @@ class TdGazeNetBase(DataFnMixin, BaseModule):
     - eyes gaze, shape: (B, 2, 2, 3)
   '''
 
-  def __init__(self, n_face_kpts: int, n_eyes_kpts: int, inputs: str = 'face+eyes',
-               shared_neck: bool = False, n_hidden_feats: int = 256):
+  def __init__(
+    self, n_face_kpts: int, n_eyes_kpts: int,
+    inputs: str = 'face+eyes',
+    shared_neck: bool = False, n_hidden_feats: int = 256,
+  ) -> None:
     super(TdGazeNetBase, self).__init__(init_cfg=None)
 
     adapt_layers = self._adapt_inputs(inputs)
@@ -319,8 +322,11 @@ class TdGazeNet(DataFnMixin, BaseModule):
   NOTE: Good Model = Sufficient Data + Strong Augmentation + Light-Weighted Network
   '''
 
-  def __init__(self, backbone: str, fusion: str, reg_head: str, n_face_kpts: int, n_eyes_kpts: int,
-               n_view_feats: int = 256, n_bbox_feats: int = 256, n_hidden_feats: int = 256):
+  def __init__(
+    self, backbone: str, fusion: str, reg_head: str,
+    n_face_kpts: int, n_eyes_kpts: int,
+    n_view_feats: int = 256, n_bbox_feats: int = 256, n_hidden_feats: int = 256,
+  ) -> None:
     assert backbone in ['resnet-18', 'fastvit-sa12']
     assert fusion in ['concat', 'adaptive']
     assert reg_head in ['simple-fc', 'multi-task']
@@ -407,97 +413,61 @@ class TdGazeNet(DataFnMixin, BaseModule):
     return face_kpts, eyes_kpts, eyes_gaze
 
 
-class _TdGazeNetDeviceAdapter(BaseModule):
-  def __init__(self, adapter: str = 'factor'):
-    assert adapter in ['factor', 'linear']
-
-    super(_TdGazeNetDeviceAdapter, self).__init__(init_cfg=None)
-
-    if adapter == 'factor':
-      self.factor = nn.Parameter(torch.tensor(1.0))
-
-    if adapter == 'linear':
-      self.linear = nn.Sequential(
-        nn.Linear(in_features=4, out_features=8),
-        nn.SiLU(inplace=True),
-        nn.LayerNorm(normalized_shape=8),
-        nn.Linear(in_features=8, out_features=4),
-      )
-      self.init_cfg = dict(type='Kaiming', mode='fan_in', layer='Linear')
-
-    self.adapter = adapter
-
-  def forward(self, bbox: torch.Tensor):
-    if self.adapter == 'factor':
-      return self.factor * bbox
-    if self.adapter == 'linear':
-      return self.linear(bbox)
-
 @MODELS.register_module()
-class TdGazeNetReal(TdGazeNet):
-  '''TdGazeNetReal extends TdGazeNet with device-specific adapters (usually frozen),
-  which helps bridge the gap between model predictions and real-world PoG data where
-  camera intrinsic is sadly unavailable or inaccurate.
+class TdGazeNetPlus(TdGazeNet):
+  '''TdGazeNet+, an enhanced version of TdGazeNet that outputs uncertainty.
 
-  The device-specific adapters adjusts the normalized face bbox via a simple scaling
-  factor or an affine transformation (learned using nn.Linear).
+  For landmark uncertainty, the log variance (numerical stable) is predicted as
+  the measure of uncertainty for each landmark. The implementation follows the
+  trick introduced in the paper "3D Face Reconstruction with Dense Landmarks".
 
-  For accurate prediction, the general advice is to use a calibrated camera with
-  known intrinsic parameters. Then, follow the steps demonstrated in the demo
-  script for TdGazeNet. TdGazeNetReal only provides a simple fix and may not be
-  sufficient nor convenient for real-world applications.
-
-  NOTE: Device-Specific Adaptation ~= Scaling/Affine Transformation on Face BBox
+  For gaze uncertainty, an extra classification head is added to predict the
+  reliability of gaze information for both eyes.
   '''
 
-  def __init__(self, *args, adapter: str = 'factor', n_adapters: int = 1,
-               freeze_body: bool = True, freeze_adapters: bool = False,
-               custom_init_cfg: dict = None, eps: float = 1e-9, **kwargs):
-    assert adapter in ['factor', 'linear']
-
-    super(TdGazeNetReal, self).__init__(*args, **kwargs)
-    if custom_init_cfg is not None:
-      assert custom_init_cfg.get('type') == 'Pretrained'
-      self.init_cfg = copy.deepcopy(custom_init_cfg)
-
-    self.device_adapters = nn.ModuleList([
-      _TdGazeNetDeviceAdapter(adapter)
-      for _ in range(n_adapters)
-    ])
-
-    for param in self.parameters():
-      param.requires_grad = not freeze_body
-    for param in self.device_adapters.parameters():
-      param.requires_grad = not freeze_adapters
-
-    self.eps = eps
-
-  def _decode_eyes_gaze(self, eyes_gaze: torch.Tensor):
-    reye_origin, reye_vector = eyes_gaze[:, 0, 0], eyes_gaze[:, 0, 1]
-    leye_origin, leye_vector = eyes_gaze[:, 1, 0], eyes_gaze[:, 1, 1]
-
-    reye_t = -reye_origin[:, 2] / (reye_vector[:, 2] + self.eps)
-    reye_xc = reye_origin[:, 0] + reye_t * reye_vector[:, 0]
-    reye_yc = reye_origin[:, 1] + reye_t * reye_vector[:, 1]
-    reye_gaze = torch.stack([reye_xc, reye_yc], dim=1)
-
-    leye_t = -leye_origin[:, 2] / (leye_vector[:, 2] + self.eps)
-    leye_xc = leye_origin[:, 0] + leye_t * leye_vector[:, 0]
-    leye_yc = leye_origin[:, 1] + leye_t * leye_vector[:, 1]
-    leye_gaze = torch.stack([leye_xc, leye_yc], dim=1)
-
-    return reye_gaze, leye_gaze
-
-  def data_fn(self, data_dict: dict):
-    return dict(
-      face=data_dict['face'], bbox=data_dict['bbox'],
-      device=data_dict['device'],
+  def __init__(
+    self, backbone: str, fusion: str, reg_head: str,
+    n_face_kpts: int, n_eyes_kpts: int,
+    n_view_feats: int = 256, n_bbox_feats: int = 256, n_hidden_feats: int = 256,
+  ) -> None:
+    super(TdGazeNetPlus, self).__init__(
+      backbone=backbone, fusion=fusion, reg_head=reg_head,
+      n_face_kpts=n_face_kpts, n_eyes_kpts=n_eyes_kpts,
+      n_view_feats=n_view_feats, n_bbox_feats=n_bbox_feats, n_hidden_feats=n_hidden_feats,
     )
 
-  def forward(self, face: torch.Tensor, bbox: torch.Tensor, device: torch.Tensor):
-    affine_bbox = torch.concat([
-      self.device_adapters[dev.item()](bb.unsqueeze(dim=0))
-      for bb, dev in zip(bbox, device)
-    ], dim=0)
-    _, _, eyes_gaze = super(TdGazeNetReal, self).forward(face, affine_bbox)
-    return self._decode_eyes_gaze(eyes_gaze)
+    _reg_head_cls = {
+      'simple-fc': _TdGazeNetRegHeadSimple,
+      'multi-task': _TdGazeNetRegHeadMultiTask,
+    }[reg_head]
+    self.face_kpts_h = _reg_head_cls(
+      n_in_feats=n_view_feats,
+      n_hidden_feats=n_hidden_feats,
+      out_shape=(n_face_kpts, 3 + 1),
+    )
+    self.eyes_kpts_h = _reg_head_cls(
+      n_in_feats=n_view_feats,
+      n_hidden_feats=n_hidden_feats,
+      out_shape=(2, n_eyes_kpts, 3 + 1),
+    )
+    self.eyes_gaze_h = _reg_head_cls(
+      n_in_feats=n_view_feats,
+      n_hidden_feats=n_hidden_feats,
+      out_shape=(2, 2, 3),
+    )
+    self.eyes_gate_h = _reg_head_cls(
+      n_in_feats=n_view_feats,
+      n_hidden_feats=n_hidden_feats,
+      out_shape=(2, 1),
+    )
+
+  def forward(self, face: torch.Tensor, bbox: torch.Tensor):
+    feats = self.forward_feats(face, bbox)
+
+    face_kpts = self.face_kpts_h(feats)
+    eyes_kpts = self.eyes_kpts_h(feats)
+    eyes_gaze = self.eyes_gaze_h(feats)
+
+    eyes_gate = self.eyes_gate_h(feats)
+
+    return face_kpts, eyes_kpts, eyes_gaze, eyes_gate

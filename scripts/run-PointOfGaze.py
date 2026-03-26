@@ -10,7 +10,6 @@ from PIL import Image
 import argparse
 import copy
 import cv2
-import math
 import numpy as np
 import random
 import torch
@@ -91,9 +90,9 @@ def rotate_vector(vector: np.ndarray, theta: float):
   return np.dot(mat, vector)
 
 
-# Data Transformations (for mit-gaze-capture datasets)
-@TRANSFORMS.register_module(name='GetFaceAndBBoxes-PointOfGaze')
-class GetFaceAndBBoxes_PointOfGaze(BaseTransform):
+# Data Transformations
+@TRANSFORMS.register_module()
+class GetFaceAndBBoxes(BaseTransform):
   def __init__(self, p_face_noisy: float = 0.5,
                face_bbox_shift: float = 0.0,
                face_bbox_scale: tuple = (1.0, 1.0),
@@ -248,8 +247,8 @@ class GetFaceAndBBoxes_PointOfGaze(BaseTransform):
     return data_dict
 
 
-@TRANSFORMS.register_module(name='PrepareDataDictA-PointOfGaze')
-class PrepareDataDictA_PointOfGaze(BaseTransform):
+@TRANSFORMS.register_module()
+class PrepareDataDictA(BaseTransform):
   def image_fn(self, image: Image):
     return TF.to_tensor(image)
 
@@ -275,8 +274,8 @@ class PrepareDataDictA_PointOfGaze(BaseTransform):
     return data_dict
 
 
-@TRANSFORMS.register_module(name='PrepareDataDictB-PointOfGaze')
-class PrepareDataDictB_PointOfGaze(BaseTransform):
+@TRANSFORMS.register_module()
+class PrepareDataDictB(BaseTransform):
   def transform(self, results: dict):
     data_dict = dict(face=results['face'], gaze=results['gaze'], rect=results['rect'])
 
@@ -300,242 +299,12 @@ class PrepareDataDictB_PointOfGaze(BaseTransform):
     return data_dict
 
 
-# Data Transformations (for ucas-synthgaze dataset)
-@TRANSFORMS.register_module(name='GetFaceAndBBoxes-SynthGaze')
-class GetFaceAndBBoxes_SynthGaze(BaseTransform):
-  def __init__(self, p_noisy: float = 0.5,
-               face_bbox_shift: float = 0.0,
-               face_bbox_scale: tuple = (1.0, 1.0),
-               face_bbox_rotate: float = 0.0,
-               eyes_bbox_ratio: float = 0.25,
-               face_crop_size: int = 224,
-               epsilon: float = 1e-9):
-
-    self.p_noisy = p_noisy
-
-    self.face_bbox_shift = face_bbox_shift
-    self.face_bbox_scale = face_bbox_scale
-    self.face_bbox_rotate = face_bbox_rotate
-
-    self.eyes_bbox_ratio = eyes_bbox_ratio
-
-    self.face_crop_size = face_crop_size
-
-    self.epsilon = epsilon
-
-  def _project_points_to_image(self, points_3d: np.ndarray, intrinsic: np.ndarray):
-    image_coords = np.dot(intrinsic, points_3d.T)
-    image_coords = image_coords[:2, :] / image_coords[2, :]
-    return image_coords.T
-
-  def _align_angle(self, head_o: np.ndarray, head_ox: np.ndarray, intrinsic: np.ndarray):
-    points_3d = np.stack([head_o, head_o + head_ox])
-    points_2d = self._project_points_to_image(points_3d, intrinsic)
-
-    norm = np.linalg.norm(points_2d[1] - points_2d[0], ord=2)
-    sin = (points_2d[0, 1] - points_2d[1, 1]) / norm
-    theta = -np.rad2deg(np.arcsin(sin))
-
-    return theta
-
-  def _bbox_from_ldmk(self, landmarks_2d: np.ndarray):
-    x_min, y_min = np.min(landmarks_2d, axis=0)
-    x_max, y_max = np.max(landmarks_2d, axis=0)
-
-    bbox_cx = (x_min + x_max) / 2.0
-    bbox_cy = (y_min + y_max) / 2.0
-    bbox_ca = math.sqrt((x_max - x_min) * (y_max - y_min))
-
-    x_min = bbox_cx - bbox_ca / 2.0
-    y_min = bbox_cy - bbox_ca / 2.0
-    x_max = bbox_cx + bbox_ca / 2.0
-    y_max = bbox_cy + bbox_ca / 2.0
-
-    return np.array([x_min, y_min, x_max, y_max], dtype=int)
-
-  def _crop_face(self, image: np.ndarray, bbox: np.ndarray):
-    face_crop = scaled_crop(image, bbox, (self.face_crop_size, self.face_crop_size))
-
-    image_h, image_w, _ = image.shape
-
-    center = np.array([image_w / 2, image_h / 2])
-    metric = max(image_h, image_w) / 2
-
-    x_min, y_min, x_max, y_max = bbox
-
-    face_bbox = np.concatenate([
-      np.array([(x_min + x_max) / 2, (y_min + y_max) / 2]) - center,
-      np.array([x_max - x_min, y_max - y_min]),
-    ], axis=0) / metric
-
-    return face_crop, face_bbox
-
-  def _eyes_bboxes(self, image: np.ndarray, bbox: np.ndarray, iris_ldmks: np.ndarray):
-    eye_center_x, eye_center_y = np.mean(iris_ldmks, axis=0)
-
-    crop_a = self.eyes_bbox_ratio * (bbox[2] - bbox[0])
-
-    x_min = eye_center_x - crop_a / 2
-    x_max = eye_center_x + crop_a / 2
-    y_min = eye_center_y - crop_a / 2
-    y_max = eye_center_y + crop_a / 2
-
-    eyes_bbox_crop = np.array([
-      (x_min - bbox[0]) / (bbox[2] - bbox[0]),
-      (y_min - bbox[1]) / (bbox[3] - bbox[1]),
-      (x_max - bbox[0]) / (bbox[2] - bbox[0]),
-      (y_max - bbox[1]) / (bbox[3] - bbox[1]),
-    ], dtype=np.float32)
-
-    image_h, image_w, _ = image.shape
-
-    center = np.array([image_w / 2, image_h / 2])
-    metric = max(image_h, image_w) / 2
-
-    eyes_bbox = np.concatenate([
-      np.array([(x_min + x_max) / 2, (y_min + y_max) / 2]) - center,
-      np.array([x_max - x_min, y_max - y_min]),
-    ], axis=0) / metric
-
-    return eyes_bbox, eyes_bbox_crop
-
-  def _gaze_from_op(self, origin: np.ndarray, vector: np.ndarray):
-    [ox, oy, oz], [vx, vy, vz] = origin, vector
-
-    t = -oz / (vz + self.epsilon)
-
-    xc = ox + t * vx
-    yc = oy + t * vy
-
-    # X-axis points rightward, Y-axis points upward
-    gaze = np.array([-xc, -yc], dtype=np.float32)
-
-    return gaze
-
-  def transform(self, results: dict):
-    data_dict = {k:v for k, v in results.items() if k.endswith('idx')}
-
-    theta = self._align_angle(results['head_o'], results['head_ox'], results['intrinsic'])
-    ldmks = np.concat([
-      results['face_mesh_light_2d'],
-      results['reye_iris_2d'], results['leye_iris_2d'],
-    ], axis=0)
-    image_rot, ldmks_rot = align_rotate(results['image'], ldmks, theta)
-
-    x_min, y_min, x_max, y_max = self._bbox_from_ldmk(ldmks_rot)
-    y_max = y_min + x_max - x_min # Initial face bbox to square
-    bbox = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
-
-    if random.random() < self.p_noisy:
-      shift_x = (2 * random.random() - 1) * (y_max - y_min) * self.face_bbox_shift
-      shift_y = (2 * random.random() - 1) * (y_max - y_min) * self.face_bbox_shift
-      scale = random.uniform(*self.face_bbox_scale)
-      rotate = (2 * random.random() - 1) * self.face_bbox_rotate
-
-      theta, image_rot, ldmks_rot, bbox = apply_bbox_noise(
-        theta, image_rot, ldmks_rot, bbox,
-        shift_x, shift_y, scale, rotate,
-      )
-
-    reye_gaze = self._gaze_from_op(
-      origin=results['reye_origin'] / 10,
-      vector=results['reye_vector'],
-    )
-    leye_gaze = self._gaze_from_op(
-      origin=results['leye_origin'] / 10,
-      vector=results['leye_vector'],
-    )
-    data_dict.update(
-      reye_gaze=rotate_vector(reye_gaze, -theta),
-      leye_gaze=rotate_vector(leye_gaze, -theta),
-    )
-
-    # Prepare face crop and norm bbox
-    face_crop, face_bbox = self._crop_face(image_rot, bbox)
-    data_dict.update(face_crop=face_crop, face_bbox=face_bbox)
-
-    # Prepare eyes bbox and crop bbox wrt face crop
-    _, iris_ldmks_2d = np.split(ldmks_rot, [len(results['face_mesh_light_2d'])], axis=0)
-    reye_iris_2d, leye_iris_2d = np.split(iris_ldmks_2d, 2, axis=0)
-    reye_bbox, reye_bbox_crop = self._eyes_bboxes(image_rot, bbox, reye_iris_2d)
-    leye_bbox, leye_bbox_crop = self._eyes_bboxes(image_rot, bbox, leye_iris_2d)
-    data_dict.update(
-      reye_bbox=reye_bbox, reye_bbox_crop=reye_bbox_crop,
-      leye_bbox=leye_bbox, leye_bbox_crop=leye_bbox_crop,
-    )
-
-    return data_dict
-
-
-@TRANSFORMS.register_module(name='PrepareDataDictA-SynthGaze')
-class PrepareDataDictA_SynthGaze(BaseTransform):
-  def image_fn(self, image: Image):
-    return TF.to_tensor(image)
-
-  def torch_fn(self, x: np.ndarray):
-    return torch.tensor(x, dtype=torch.float32)
-
-  def transform(self, results: dict):
-    data_dict = {k:v for k, v in results.items() if k.endswith('idx')}
-
-    face = cv2.cvtColor(results['face_crop'], cv2.COLOR_BGR2RGB)
-    face = self.image_fn(Image.fromarray(face, mode='RGB'))
-    reye_gaze = self.torch_fn(results['reye_gaze'])
-    leye_gaze = self.torch_fn(results['leye_gaze'])
-    rect = self.torch_fn(
-      np.concatenate([
-        results['face_bbox'],
-        results['reye_bbox'],
-        results['leye_bbox'],
-      ], axis=0)
-    )
-    data_dict.update(face=face, reye_gaze=reye_gaze, leye_gaze=leye_gaze, rect=rect)
-
-    data_dict.update(reye_bbox_crop=results['reye_bbox_crop'])
-    data_dict.update(leye_bbox_crop=results['leye_bbox_crop'])
-
-    return data_dict
-
-
-@TRANSFORMS.register_module(name='PrepareDataDictB-SynthGaze')
-class PrepareDataDictB_SynthGaze(BaseTransform):
-  def transform(self, results: dict):
-    data_dict = {k:v for k, v in results.items() if k.endswith('idx')}
-    data_dict.update(face=results['face'], rect=results['rect'])
-    data_dict.update(
-      reye_gaze=results['reye_gaze'],
-      leye_gaze=results['leye_gaze'],
-    )
-
-    x_min, y_min, x_max, y_max = np.astype(results['reye_bbox_crop'] * 224, np.int32)
-    reye_crop = TF.resize(
-      TF.crop(results['face'], y_min, x_min, y_max - y_min, x_max - x_min),
-      size=(112, 112),
-      interpolation=TF.InterpolationMode.BICUBIC,
-    )
-
-    x_min, y_min, x_max, y_max = np.astype(results['leye_bbox_crop'] * 224, np.int32)
-    leye_crop = TF.resize(
-      TF.crop(results['face'], y_min, x_min, y_max - y_min, x_max - x_min),
-      size=(112, 112),
-      interpolation=TF.InterpolationMode.BICUBIC,
-    )
-
-    data_dict.update(reye=reye_crop, leye=leye_crop)
-
-    return data_dict
-
-
 # Script Configuration
 def build_model_config_dict(opts: argparse.Namespace):
   # Model config
   if opts.data_name in ['mit-gaze-capture', 'mit-gaze-capture-abalation-glasses']:
     model_cfgs = ScriptEnv.load_config_dict('configs/model/gaze-2d.py')
     model_config_dict = model_cfgs['AFFNet']
-
-  if opts.data_name in ['ucas-synthgaze']:
-    model_cfgs = ScriptEnv.load_config_dict('configs/model/gaze-2d.py')
-    model_config_dict = model_cfgs['AFFNetD']
 
   return dict(model=model_config_dict)
 
@@ -544,7 +313,7 @@ def build_data_pipeline(data_name: str):
   if data_name == 'mit-gaze-capture':
     train_pipeline = [
       dict(
-        type='GetFaceAndBBoxes-PointOfGaze',
+        type='GetFaceAndBBoxes',
         p_face_noisy=0.8,
         face_bbox_shift=0.1,
         face_bbox_scale=(1.0, 1.2),
@@ -553,7 +322,7 @@ def build_data_pipeline(data_name: str):
         eyes_bbox_shift=0.1,
         eyes_bbox_scale=(1.0, 1.2),
       ),
-      dict(type='PrepareDataDictA-PointOfGaze'),
+      dict(type='PrepareDataDictA'),
       dict(
         type='RandomImageAugmentation',
         image_data_key='face',
@@ -569,59 +338,17 @@ def build_data_pipeline(data_name: str):
         random_jpeg_kwargs=dict(jpeg_quality=(20, 80), p=0.4),
         random_planckian_jitter_kwargs=dict(p=0.4),
       ),
-      dict(type='PrepareDataDictB-PointOfGaze'),
+      dict(type='PrepareDataDictB'),
     ]
     test_pipeline = [
-      dict(type='GetFaceAndBBoxes-PointOfGaze', p_face_noisy=0.0, p_eyes_noisy=0.0),
-      dict(type='PrepareDataDictA-PointOfGaze'),
+      dict(type='GetFaceAndBBoxes', p_face_noisy=0.0, p_eyes_noisy=0.0),
+      dict(type='PrepareDataDictA'),
       dict(
         type='RandomImageAugmentation',
         image_data_key='face',
         normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
       ),
-      dict(type='PrepareDataDictB-PointOfGaze'),
-    ]
-
-  if data_name == 'ucas-synthgaze':
-    swap_file = ScriptEnv.resource_path('synthgaze/vertices-swap-pairs.json')
-    train_pipeline = [
-      dict(type='RandomCameraRotate3D', camera_roll=60, safe_margin=5),
-      dict(type='RandomHFlip2D', swap_file=swap_file, p_hflip=0.5),
-      dict(
-        type='GetFaceAndBBoxes-SynthGaze',
-        p_noisy=0.8,
-        face_bbox_shift=0.15,
-        face_bbox_scale=(1.0, 1.5),
-        face_bbox_rotate=4.0,
-      ),
-      dict(type='PrepareDataDictA-SynthGaze'),
-      dict(
-        type='RandomImageAugmentation',
-        image_data_key='face',
-        p=0.6, n_max_effective=4, drop_batch_dim=True,
-        normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        color_jiggle_kwargs=dict(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),
-        random_gray_scale_kwargs=dict(p=0.4),
-        random_gaussian_blur_kwargs=dict(kernel_size=3, sigma=(0.1, 2.0), p=0.4),
-        random_motion_blur_kwargs=dict(kernel_size=3, angle=80.0, direction=0, p=0.4),
-        random_sharpness_kwargs=dict(sharpness=(0.1, 0.5), p=0.4),
-        random_gamma_kwargs=dict(gamma=(0.5, 2.0), gain=(0.9, 1.1), p=0.4),
-        random_posterize_kwargs=dict(bits=6, p=0.4),
-        random_jpeg_kwargs=dict(jpeg_quality=(20, 80), p=0.4),
-        random_planckian_jitter_kwargs=dict(p=0.4),
-      ),
-      dict(type='PrepareDataDictB-SynthGaze'),
-    ]
-    test_pipeline = [
-      dict(type='RandomCameraRotate3D', camera_roll=60, safe_margin=5),
-      dict(type='GetFaceAndBBoxes-SynthGaze', p_noisy=0.0),
-      dict(type='PrepareDataDictA-SynthGaze'),
-      dict(
-        type='RandomImageAugmentation',
-        image_data_key='face',
-        normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-      ),
-      dict(type='PrepareDataDictB-SynthGaze'),
+      dict(type='PrepareDataDictB'),
     ]
 
   return train_pipeline, test_pipeline
@@ -629,7 +356,7 @@ def build_data_pipeline(data_name: str):
 def build_data_config_dict(opts: argparse.Namespace):
   # Dataset config
   if opts.data_name == 'mit-gaze-capture':
-    dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/point-of-gaze/mit-gaze-capture.py')
+    dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/mit-gaze-capture.py')
     train_pipeline, test_pipeline = build_data_pipeline('mit-gaze-capture')
 
     dataset_cfgs['train'].update(subset=opts.train_subset, pipeline=train_pipeline)
@@ -642,21 +369,10 @@ def build_data_config_dict(opts: argparse.Namespace):
     metric_cfgs = ScriptEnv.load_config_dict('configs/metric/gaze-2d.py')
     evaluator_metrics = metric_cfgs['DistanceError']
 
-  if opts.data_name == 'ucas-synthgaze':
-    dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/ucas-synthgaze.py')
-    train_pipeline, test_pipeline = build_data_pipeline('ucas-synthgaze')
-
-    dataset_cfgs['train'].update(subset=opts.train_subset, pipeline=train_pipeline)
-    dataset_cfgs['test'].update(subset=opts.test_subset, pipeline=test_pipeline)
-
-    # Metric config
-    metric_cfgs = ScriptEnv.load_config_dict('configs/metric/gaze-2d.py')
-    evaluator_metrics = metric_cfgs['AFFNetDMetrics']
-
   if opts.data_name == 'mit-gaze-capture-abalation-glasses':
     assert opts.abalation_glasses_device in ['iPhone 6', 'iPhone 5S']
 
-    dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/point-of-gaze/mit-gaze-capture.py')
+    dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/mit-gaze-capture.py')
     train_pipeline, test_pipeline = build_data_pipeline('mit-gaze-capture')
 
     train_a_size = opts.abalation_glasses_n_total_samples - opts.abalation_glasses_n_glasses_samples
@@ -832,7 +548,7 @@ if __name__ == '__main__':
 
   data_group.add_argument(
     '--data-name', required=True, choices=[
-      'mit-gaze-capture', 'ucas-synthgaze',
+      'mit-gaze-capture',
       'mit-gaze-capture-abalation-glasses',
     ],
     help='select data name for current run.',

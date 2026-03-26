@@ -1,8 +1,10 @@
 from mmengine.model import BaseModel
+from typing import Callable, Optional
 
 from opengaze.registry import MODELS, LOSSES
 
 import torch as torch
+import torch.nn.functional as F
 
 
 class DataFnMixin:
@@ -70,56 +72,35 @@ class BackboneHead(BaseModel):
 
 
 @MODELS.register_module()
-class AFFNetDWrapper(BaseModel):
-  def __init__(self, model_cfg: dict, loss_cfg: dict, x_limits: tuple, y_limits: tuple):
-    super(AFFNetDWrapper, self).__init__()
-
-    self.model: DataFnMixin = MODELS.build(model_cfg)
-    self.loss_fn = LOSSES.build(loss_cfg)
-
-    self.x_limits = x_limits
-    self.y_limits = y_limits
-
-  def _filter_samples(self, pred_gaze: torch.Tensor, gold_gaze: torch.Tensor):
-    x_mask = torch.logical_and(
-      gold_gaze[:, 0] >= self.x_limits[0],
-      gold_gaze[:, 0] <= self.x_limits[1],
-    )
-    y_mask = torch.logical_and(
-      gold_gaze[:, 1] >= self.y_limits[0],
-      gold_gaze[:, 1] <= self.y_limits[1],
-    )
-    mask = torch.logical_and(x_mask, y_mask)
-    return pred_gaze[mask], gold_gaze[mask]
-
-  def forward(self, mode='tensor', **data_dict):
-    reye_gaze, leye_gaze = self.model(**self.model.data_fn(data_dict))
-
-    if mode == 'loss':
-      reye_pred, reye_gold = self._filter_samples(reye_gaze, data_dict['reye_gaze'])
-      reye_loss = self.loss_fn(reye_pred, reye_gold)
-      leye_pred, leye_gold = self._filter_samples(leye_gaze, data_dict['leye_gaze'])
-      leye_loss = self.loss_fn(leye_pred, leye_gold)
-      loss_dict = dict(loss=reye_loss + leye_loss)
-      loss_dict.update(reye_loss=reye_loss, leye_loss=leye_loss)
-      return loss_dict
-
-    if mode == 'predict':
-      pred_dict = dict(reye_gaze=reye_gaze, leye_gaze=leye_gaze)
-      gold_dict = dict(
-        reye_gaze=data_dict['reye_gaze'],
-        leye_gaze=data_dict['leye_gaze'],
-      )
-      return pred_dict, gold_dict
-
-    return reye_gaze, leye_gaze
-
-
-@MODELS.register_module()
 class TdGazeNetWrapper(BaseModel):
-  def __init__(self, model_cfg: dict, face_kpts_loss_cfg: dict, eyes_kpts_loss_cfg: dict,
-               gaze_origin_loss_cfg: dict, gaze_vector_loss_cfg: dict, loss_weight: dict):
+  def __init__(
+    self, model_cfg: dict,
+    face_kpts_loss_cfg: dict,
+    eyes_kpts_loss_cfg: dict,
+    gaze_origin_loss_cfg: dict,
+    gaze_vector_loss_cfg: dict,
+    loss_weight: dict,
+  ) -> None:
     super(TdGazeNetWrapper, self).__init__()
+
+    assert all([
+      'reduction' in loss_cfg and loss_cfg['reduction'] == 'none'
+      for loss_cfg in [
+        face_kpts_loss_cfg, eyes_kpts_loss_cfg,
+        gaze_origin_loss_cfg, gaze_vector_loss_cfg,
+      ]
+    ])
+    assert all([
+      loss_key in loss_weight
+      for loss_key in [
+        'face_kpts_loss', 'eyes_kpts_loss',
+        'gaze_origin_loss', 'gaze_vector_loss',
+      ]
+    ])
+
+    self._plus = model_cfg['type'] == 'TdGazeNetPlus'
+    if self._plus: assert 'eyes_gate_loss' in loss_weight
+
     self.model: DataFnMixin = MODELS.build(model_cfg)
 
     self.face_kpts_loss = LOSSES.build(face_kpts_loss_cfg)
@@ -128,36 +109,82 @@ class TdGazeNetWrapper(BaseModel):
     self.gaze_origin_loss = LOSSES.build(gaze_origin_loss_cfg)
     self.gaze_vector_loss = LOSSES.build(gaze_vector_loss_cfg)
 
-    _loss_names = [
-      'face_kpts_loss', 'eyes_kpts_loss',
-      'gaze_origin_loss', 'gaze_vector_loss',
-    ]
-    assert all([key in loss_weight for key in _loss_names])
-
     self.loss_weight = loss_weight
 
+  def _custom_forward(self, data_dict: dict):
+    output = self.model(**self.model.data_fn(data_dict))
+    face_kpts, eyes_kpts, eyes_gaze = output[:3]
+    eyes_gate = output[3] if self._plus else None
+    return face_kpts, eyes_kpts, eyes_gaze, eyes_gate
+
+  def _custom_kpts_loss(
+    self, loss_fn_name: str,
+    pred: torch.Tensor, gold: torch.Tensor,
+  ) -> torch.Tensor:
+    loss_fn: Callable = getattr(self, loss_fn_name)
+    loss = loss_fn(pred[..., :3], gold).mean(dim=-1)
+    if self._plus:
+      loss_mu = (1.0 + loss) / torch.exp(pred[..., 3])
+      loss = pred[..., 3] + 0.5 * loss_mu
+    weight = self.loss_weight[loss_fn_name]
+    return weight * loss.mean()
+
+  def _custom_gaze_loss(
+    self, loss_fn_name: str,
+    pred: torch.Tensor, gold: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+  ) -> torch.Tensor:
+    loss_fn: Callable = getattr(self, loss_fn_name)
+    loss = loss_fn(pred, gold)
+    if mask is not None:
+      loss = loss * mask
+    weight = self.loss_weight[loss_fn_name]
+    return weight * loss.mean()
+
+  def _custom_gate_loss(
+    self, pred: torch.Tensor, mask: torch.Tensor,
+  ) -> torch.Tensor:
+    loss_fn = F.binary_cross_entropy_with_logits
+    loss = loss_fn(pred, mask, reduction='none')
+    weight = self.loss_weight['eyes_gate_loss']
+    return weight * loss.mean()
+
   def forward(self, mode='tensor', **data_dict):
-    face_kpts, eyes_kpts, eyes_gaze = self.model(**self.model.data_fn(data_dict))
+    face_kpts, eyes_kpts, eyes_gaze, eyes_gate = self._custom_forward(data_dict)
 
     if mode == 'loss':
-      face_kpts_loss = self.face_kpts_loss(face_kpts, data_dict['face_kpts'])
-      eyes_kpts_loss = self.eyes_kpts_loss(eyes_kpts, data_dict['eyes_kpts'])
+      face_kpts_loss = self._custom_kpts_loss(
+        loss_fn_name='face_kpts_loss',
+        pred=face_kpts, gold=data_dict['face_kpts'],
+      )
+      eyes_kpts_loss = self._custom_kpts_loss(
+        loss_fn_name='eyes_kpts_loss',
+        pred=eyes_kpts, gold=data_dict['eyes_kpts'],
+      )
 
-      reye_origin_loss = self.gaze_origin_loss(
-        eyes_gaze[:, 0, 0],
-        data_dict['eyes_gaze'][:, 0, 0],
+      reye_origin_loss = self._custom_gaze_loss(
+        loss_fn_name='gaze_origin_loss',
+        pred=eyes_gaze[:, 0, 0],
+        gold=data_dict['eyes_gaze'][:, 0, 0],
+        mask=data_dict['reye_mask'],
       )
-      reye_vector_loss = self.gaze_vector_loss(
-        eyes_gaze[:, 0, 1],
-        data_dict['eyes_gaze'][:, 0, 1],
+      reye_vector_loss = self._custom_gaze_loss(
+        loss_fn_name='gaze_vector_loss',
+        pred=eyes_gaze[:, 0, 1],
+        gold=data_dict['eyes_gaze'][:, 0, 1],
+        mask=data_dict['reye_mask'],
       )
-      leye_origin_loss = self.gaze_origin_loss(
-        eyes_gaze[:, 1, 0],
-        data_dict['eyes_gaze'][:, 1, 0],
+      leye_origin_loss = self._custom_gaze_loss(
+        loss_fn_name='gaze_origin_loss',
+        pred=eyes_gaze[:, 1, 0],
+        gold=data_dict['eyes_gaze'][:, 1, 0],
+        mask=data_dict['leye_mask'],
       )
-      leye_vector_loss = self.gaze_vector_loss(
-        eyes_gaze[:, 1, 1],
-        data_dict['eyes_gaze'][:, 1, 1],
+      leye_vector_loss = self._custom_gaze_loss(
+        loss_fn_name='gaze_vector_loss',
+        pred=eyes_gaze[:, 1, 1],
+        gold=data_dict['eyes_gaze'][:, 1, 1],
+        mask=data_dict['leye_mask'],
       )
 
       gaze_origin_loss = (reye_origin_loss + leye_origin_loss) / 2
@@ -170,20 +197,25 @@ class TdGazeNetWrapper(BaseModel):
         gaze_vector_loss=gaze_vector_loss,
       )
 
-      loss = sum([
-        self.loss_weight['face_kpts_loss'] * face_kpts_loss,
-        self.loss_weight['eyes_kpts_loss'] * eyes_kpts_loss,
-        self.loss_weight['gaze_origin_loss'] * gaze_origin_loss,
-        self.loss_weight['gaze_vector_loss'] * gaze_vector_loss,
-      ])
+      if self._plus:
+        reye_gate_loss = self._custom_gate_loss(
+          pred=eyes_gate[:, 0],
+          mask=data_dict['reye_mask'],
+        )
+        leye_gate_loss = self._custom_gate_loss(
+          pred=eyes_gate[:, 1],
+          mask=data_dict['leye_mask'],
+        )
+        eyes_gate_loss = (reye_gate_loss + leye_gate_loss) / 2
+        loss_dict['eyes_gate_loss'] = eyes_gate_loss
 
-      return dict(**loss_dict, loss=loss)
+      return dict(**loss_dict, loss=sum(loss_dict.values()))
 
     if mode == 'predict':
       pred_dict = dict(
-        face_kpts=face_kpts,
-        reye_kpts=eyes_kpts[:, 0],
-        leye_kpts=eyes_kpts[:, 1],
+        face_kpts=face_kpts[..., :3],
+        reye_kpts=eyes_kpts[:, 0, :, :3],
+        leye_kpts=eyes_kpts[:, 1, :, :3],
         reye_origin=eyes_gaze[:, 0, 0],
         reye_vector=eyes_gaze[:, 0, 1],
         leye_origin=eyes_gaze[:, 1, 0],
@@ -200,6 +232,15 @@ class TdGazeNetWrapper(BaseModel):
         leye_vector=data_dict['eyes_gaze'][:, 1, 1],
       )
 
+      if self._plus:
+        pred_dict['face_kpts_log_variance'] = face_kpts[..., 3]
+        pred_dict['reye_kpts_log_variance'] = eyes_kpts[:, 0, :, 3]
+        pred_dict['leye_kpts_log_variance'] = eyes_kpts[:, 1, :, 3]
+        pred_dict['reye_gate'] = F.sigmoid(eyes_gate[:, 0])
+        pred_dict['leye_gate'] = F.sigmoid(eyes_gate[:, 1])
+        gold_dict['reye_gate'] = data_dict['reye_mask']
+        gold_dict['leye_gate'] = data_dict['leye_mask']
+
       return pred_dict, gold_dict
 
-    return face_kpts, eyes_kpts, eyes_gaze
+    return face_kpts, eyes_kpts, eyes_gaze, eyes_gate

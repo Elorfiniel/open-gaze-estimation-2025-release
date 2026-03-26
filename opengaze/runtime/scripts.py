@@ -30,7 +30,7 @@ class ScriptOptions:
 
     self.script_group.add_argument(
       '--work-dir', type=str, required=True,
-      help='directory for logs and checkpoints.'
+      help='directory for logs and checkpoints.',
     )
     self.script_group.add_argument(
       '--launcher', choices=['none', 'pytorch', 'slurm', 'mpi'], default='none',
@@ -38,16 +38,16 @@ class ScriptOptions:
     )
     self.script_group.add_argument(
       '--cfg-options', nargs='+', action=DictAction,
-      help='override settings in the config file.'
+      help='override settings in the config file.',
     )
 
     self.script_group.add_argument(
       '--resume', action='store_true', default=False,
-      help='resume training from the loaded or the latest checkpoint.'
+      help='resume training from the loaded or the latest checkpoint.',
     )
     self.script_group.add_argument(
       '--load-from', type=str,
-      help='the checkpoint file to load from.'
+      help='the checkpoint file to load from.',
     )
 
   def parse_args(self, args=None):

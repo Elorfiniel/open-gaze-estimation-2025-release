@@ -1,5 +1,6 @@
 from opengaze.runtime.camera import VideoCaptureBuilder, CaptureHandler
 from opengaze.runtime.camera import use_state
+from opengaze.runtime.time import TimeViaEMA
 from opengaze.utils.gc import FaceLandmarks, FaceAlignment
 from opengaze.model.gaze_2d import AFFNet
 
@@ -56,10 +57,13 @@ class FrameConsumer:
   def __init__(self, demo_data: dict, landmarker: FaceLandmarks,
                alignment: FaceAlignment, device: torch.device):
     self.name = 'AFFNet Demo'
+
     self.demo_data = demo_data
     self.landmarker = landmarker
     self.alignment = alignment
     self.device = device
+
+    self.time = TimeViaEMA(alpha=0.1)
 
   def __enter__(self):
     # Manage OpenCV resources
@@ -192,14 +196,21 @@ class FrameConsumer:
   def process(self, frame: np.ndarray, model: AFFNet):
     adjusted_frame = self._adjust_image_size(frame)
 
+    self.time.tick(tag='mediapipe')
     landmarks = self.landmarker.process(adjusted_frame, bgr2rgb=True)
+    self.time.tock(tag='mediapipe')
+
     if landmarks is None:
       return dict(success=False, frame=frame, message='No face detected.')
 
     align_dict = self.alignment.align(adjusted_frame, landmarks)
 
     data_dict = self._model_data_dict(align_dict)
+
+    self.time.tick(tag='inference')
     output_dict = self._model_inference(model, data_dict)
+    self.time.tock(tag='inference')
+
     proc_dict = self._model_post_proc(align_dict, output_dict)
 
     return dict(success=True, frame=frame, **proc_dict)
@@ -234,9 +245,26 @@ class FrameConsumer:
         **gaze_kwargs,
       )
 
+  def _draw_text(self, canvas: np.ndarray, result_dict: dict):
+    screen_h, screen_w = self.screen_hw_px
+
+    text_kwargs = dict(
+      fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5,
+      color=(255, 255, 255), thickness=1, lineType=cv2.LINE_AA,
+    )
+
+    if result_dict['success']:
+      # Measured time for different stages
+      text = ', '.join([
+        f'MediaPipe: {1e3 * self.time.report(tag="mediapipe"):.2f} ms',
+        f'Inference: {1e3 * self.time.report(tag="inference"):.2f} ms',
+      ])
+      cv2.putText(canvas, text, (30, screen_h - 30), **text_kwargs)
+
   def display(self, result_dict: dict):
     canvas = np.zeros(shape=(*self.screen_hw_px, 3), dtype=np.uint8)
     self._draw_frame(canvas, result_dict)
+    self._draw_text(canvas, result_dict)
     cv2.imshow(self.name, canvas)
     return cv2.waitKey(6) & 0xFF == ord('X')
 
@@ -257,7 +285,11 @@ class ImageCaptureHandler(CaptureHandler):
 
 class ImageFrameConsumer(FrameConsumer):
   def __call__(self, src_image: np.ndarray, set_exit_cond: Callable, model: AFFNet):
-    result_dict, _ = super().__call__(src_image, set_exit_cond, model)
+    result_dict = self.process(src_image, model)
+
+    if not self.headless:
+      exit_cond = self.display(result_dict)
+      set_exit_cond(exit_cond)
 
     if result_dict['success']:
       gaze_dict = dict(
@@ -270,7 +302,7 @@ class ImageFrameConsumer(FrameConsumer):
 
     self.results_file.write(json.dumps(gaze_dict) + '\n')
 
-  def __init__(self, image_sequence: str, **kwargs):
+  def __init__(self, image_sequence: str, headless: bool, **kwargs):
     super(ImageFrameConsumer, self).__init__(**kwargs)
 
     images_folder = osp.abspath(osp.dirname(image_sequence))
@@ -278,14 +310,26 @@ class ImageFrameConsumer(FrameConsumer):
       osp.dirname(images_folder),
       'AFFNet-results.jsonl',
     )
+    self.headless = headless
 
   def __enter__(self):
     self.results_file = open(self.results_path, 'w', encoding='utf-8')
-    return super().__enter__()
+
+    if not self.headless:
+      return super().__enter__()
+
+    # Manage face landmarker manually in headless mode
+    self.landmarker.create()
+
+    return self
 
   def __exit__(self, exc_type, exc_val, exc_tb):
     self.results_file.close()
-    super().__exit__(exc_type, exc_val, exc_tb)
+
+    if not self.headless:
+      super().__exit__(exc_type, exc_val, exc_tb)
+    else:
+      self.landmarker.destroy()
 
 
 # Entrypoint, Arguments and Top-Level Utilities
@@ -319,6 +363,7 @@ def main_procedure(opts: argparse.Namespace):
     demo_data['camera']['capture_id'] = opts.image_sequence
     consumer = ImageFrameConsumer(
       image_sequence=opts.image_sequence,
+      headless=opts.image_headless_mode,
       demo_data=demo_data, **consumer_kwargs,
     )
     capture_handler_cls = ImageCaptureHandler
@@ -343,6 +388,10 @@ if __name__ == '__main__':
   parser.add_argument(
     '--image-sequence', type=str, default='',
     help='optional input image sequence for `cv2.VideoCapture`.',
+  )
+  parser.add_argument(
+    '--image-headless-mode', action='store_true', default=False,
+    help='run headless mode for image sequence (no display).',
   )
 
   model_group = parser.add_argument_group(

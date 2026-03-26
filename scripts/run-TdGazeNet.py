@@ -6,6 +6,7 @@ from opengaze.utils.image import scaled_crop
 from mmengine.config import Config
 from mmengine.runner import Runner
 from PIL import Image
+from typing import Dict, Tuple
 
 import argparse
 import cv2
@@ -86,6 +87,25 @@ class GetFaceAndBBox(BaseTransform):
 
 @TRANSFORMS.register_module()
 class PrepareDataDict(BaseTransform):
+  def __init__(self, max_gaze_angle: float = 80.0, pupil_vis_thres: float = 0.5):
+    self.max_gaze_angle = max_gaze_angle
+    self.pupil_vis_thres = pupil_vis_thres
+
+  def _create_eyes_mask(self, gaze: np.ndarray, pupil_vis: np.ndarray):
+    neg_z = np.array([0.0, 0.0, -1.0])
+    dot = np.dot(gaze, neg_z)
+    m_g = np.linalg.norm(gaze)
+    sim = np.clip(dot / m_g, -1.0, 1.0)
+    deg = np.rad2deg(np.acos(sim))
+
+    vis = np.sum(pupil_vis) / len(pupil_vis)
+
+    mask_1 = 0.0 <= deg and deg <= self.max_gaze_angle
+    mask_2 = vis >= self.pupil_vis_thres
+    mask = 1.0 if mask_1 and mask_2 else 0.0
+
+    return torch.tensor([mask], dtype=torch.float32)
+
   def image_fn(self, image: Image):
     return TF.to_tensor(image)
 
@@ -118,13 +138,120 @@ class PrepareDataDict(BaseTransform):
     ])
     data_dict.update(eyes_gaze=self.torch_fn(eyes_gaze))
 
+    # Shape: (1, ), Mask for High Quality Eye Patches
+    data_dict['reye_mask'] = self._create_eyes_mask(
+      gaze=results['reye_vector'],
+      pupil_vis=results['reye_pupil_vis'],
+    )
+    data_dict['leye_mask'] = self._create_eyes_mask(
+      gaze=results['leye_vector'],
+      pupil_vis=results['leye_pupil_vis'],
+    )
+
     return data_dict
 
 
 # Script Configuration
+def _build_train_data_names(opts: argparse.Namespace):
+  return [n for n in opts.data_name.split('+')]
+
+def _build_test_data_names(opts: argparse.Namespace):
+  if opts.test_data_name == 'none':
+    opts.test_data_name = opts.data_name
+  return [n for n in opts.test_data_name.split('+')]
+
+def _build_train_loop_config(
+  opts: argparse.Namespace,
+  loop_cls: str,
+  train_dataset_cfgs: dict,
+  dataloader_kwargs: dict,
+):
+  assert loop_cls in ['EpochBasedTrainLoop']
+
+  if opts.data_name == 'default+extended':
+    dataset_cfg = dict(
+      type='ConcatDataset',
+      datasets=[
+        train_dataset_cfgs.get('default'),
+        train_dataset_cfgs.get('extended'),
+      ],
+    )
+  else:
+    dataset_cfg = train_dataset_cfgs.get(opts.data_name)
+
+  dataloader = dict(dataset=dataset_cfg, **dataloader_kwargs)
+
+  dataloader_config = dict(dataset=dataset_cfg, **dataloader_kwargs)
+  loop_config = dict(type=loop_cls, dataloader=dataloader, max_epochs=opts.max_epochs)
+
+  return dataloader_config, loop_config
+
+def _build_single_dataset_loop_config(
+  opts: argparse.Namespace,
+  loop_cls: str,
+  test_dataset_cfgs: dict,
+  dataloader_kwargs: dict,
+  evaluator_metrics: list,
+) -> Tuple[Dict, Dict, Dict]:
+  assert loop_cls in ['ValLoop', 'TestLoop']
+
+  dataset_cfg = test_dataset_cfgs.get(opts.test_data_name)
+
+  dataloader = dict(dataset=dataset_cfg, **dataloader_kwargs)
+  evaluator = [
+    dict(prefix=opts.test_data_name, **evaluator_metric)
+    for evaluator_metric in evaluator_metrics
+  ]
+
+  dataloader_config = dict(dataset=dataset_cfg, **dataloader_kwargs)
+  evaluator_config = [
+    dict(prefix=opts.test_data_name, **evaluator_metric)
+    for evaluator_metric in evaluator_metrics
+  ]
+  loop_config = dict(type=loop_cls, dataloader=dataloader, evaluator=evaluator)
+
+  return dataloader_config, evaluator_config, loop_config
+
+def _build_multi_dataset_loop_config(
+  opts: argparse.Namespace,
+  loop_cls: str,
+  test_dataset_cfgs: dict,
+  dataloader_kwargs: dict,
+  evaluator_metrics: list,
+) -> Tuple[Dict, Dict, Dict]:
+  assert loop_cls in ['MultiSetValLoop', 'MultiSetTestLoop']
+
+  dataloaders, evaluators = [], []
+  for name, dataset_cfg in test_dataset_cfgs.items():
+    dataloaders.append(dict(dataset=dataset_cfg, **dataloader_kwargs))
+    evaluators.append([
+      dict(prefix=name, **evaluator_metric)
+      for evaluator_metric in evaluator_metrics
+    ])
+
+  dataloader_config = dict(dataset=test_dataset_cfgs, **dataloader_kwargs)
+  evaluator_config = [
+    dict(prefix=opts.test_data_name, **evaluator_metric)
+    for evaluator_metric in evaluator_metrics
+  ]
+  loop_config = dict(type=loop_cls, dataloaders=dataloaders, evaluators=evaluators)
+
+  return dataloader_config, evaluator_config, loop_config
+
 def build_data_config_dict(opts: argparse.Namespace):
+  assert opts.data_name in ['default', 'extended', 'default+extended'], f'Invalid data name: {opts.data_name}'
+  assert 0.0 <= opts.max_gaze_angle <= 180.0, f'Invalid max gaze angle: {opts.max_gaze_angle}'
+  assert 0.0 <= opts.pupil_vis_thres <= 1.0, f'Invalid pupil visibility threshold: {opts.pupil_vis_thres}'
+
   # Dataset config
   dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/ucas-synthgaze.py')
+  dataset_cfgs['train'] = dict()  # Train data
+  for name in _build_train_data_names(opts):
+    dataset_cfgs['train'][name] = dataset_cfgs[f'train_{name}']
+
+  dataset_cfgs['test'] = dict() # Test data
+  for name in _build_test_data_names(opts):
+    dataset_cfgs['test'][name] = dataset_cfgs[f'test_{name}']
 
   swap_file = ScriptEnv.resource_path('synthgaze/vertices-swap-pairs.json')
   pipeline = [
@@ -134,7 +261,11 @@ def build_data_config_dict(opts: argparse.Namespace):
       type='GetFaceAndBBox',
       p_noisy=0.8, face_bbox_shift=0.15, face_bbox_scale=(1.0, 1.5),
     ),
-    dict(type='PrepareDataDict'),
+    dict(
+      type='PrepareDataDict',
+      max_gaze_angle=opts.max_gaze_angle,
+      pupil_vis_thres=opts.pupil_vis_thres,
+    ),
     dict(
       type='RandomImageAugmentation',
       image_data_key='face',
@@ -151,19 +282,25 @@ def build_data_config_dict(opts: argparse.Namespace):
       random_planckian_jitter_kwargs=dict(p=0.4),
     ),
   ]
-  dataset_cfgs['train'].update(subset=opts.train_subset, pipeline=pipeline)
+  for name in dataset_cfgs['train']:
+    dataset_cfgs['train'][name].update(subset=opts.train_subset, pipeline=pipeline)
 
   pipeline = [
     dict(type='RandomCameraRotate3D', camera_roll=60, safe_margin=5),
     dict(type='GetFaceAndBBox', p_noisy=0.0),
-    dict(type='PrepareDataDict'),
+    dict(
+      type='PrepareDataDict',
+      max_gaze_angle=80.0,
+      pupil_vis_thres=0.5,
+    ),
     dict(
       type='RandomImageAugmentation',
       image_data_key='face',
       normalize_kwargs=dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ),
   ]
-  dataset_cfgs['test'].update(subset=opts.test_subset, pipeline=pipeline)
+  for name in dataset_cfgs['test']:
+    dataset_cfgs['test'][name].update(subset=opts.test_subset, pipeline=pipeline)
 
   # Metric config
   metric_cfgs = ScriptEnv.load_config_dict('configs/metric/gaze-dp.py')
@@ -171,31 +308,83 @@ def build_data_config_dict(opts: argparse.Namespace):
     metric_cfgs['TdGazeNetGazeMetrics'],
     metric_cfgs['TdGazeNetMeshMetrics'],
   ]
+  if opts.model_name == 'TdGazeNetPlus':
+    evaluator_metrics.append(metric_cfgs['TdGazeNetPlusMetrics'])
 
   # Dataloader config
-  dataloader_kwargs = dict(
+  train_dataloader_kwargs = dict(
     num_workers=opts.num_workers,
     batch_size=opts.batch_size,
-    sampler=dict(type='DefaultSampler', shuffle=True),
+    sampler=dataset_cfgs['train_data_sampler'],
     collate_fn=dict(type='default_collate'),
   )
+  test_dataloader_kwargs = dict(
+    num_workers=opts.num_workers,
+    batch_size=opts.batch_size,
+    sampler=dataset_cfgs['test_data_sampler'],
+    collate_fn=dict(type='default_collate'),
+  )
+
+  # Loop config
+  train_dataloader_cfg, train_loop_cfg = _build_train_loop_config(
+    opts=opts, loop_cls='EpochBasedTrainLoop',
+    train_dataset_cfgs=dataset_cfgs['train'],
+    dataloader_kwargs=train_dataloader_kwargs,
+  )
+
+  if opts.test_data_name == 'default+extended':
+    val_dataloader_cfg, val_evaluator_cfg, val_loop_cfg = (
+      _build_multi_dataset_loop_config(
+        opts=opts, loop_cls='MultiSetValLoop',
+        test_dataset_cfgs=dataset_cfgs['test'],
+        dataloader_kwargs=test_dataloader_kwargs,
+        evaluator_metrics=evaluator_metrics,
+      )
+    )
+    test_dataloader_cfg, test_evaluator_cfg, test_loop_cfg = (
+      _build_multi_dataset_loop_config(
+        opts=opts, loop_cls='MultiSetTestLoop',
+        test_dataset_cfgs=dataset_cfgs['test'],
+        dataloader_kwargs=test_dataloader_kwargs,
+        evaluator_metrics=evaluator_metrics,
+      )
+    )
+  else:
+    val_dataloader_cfg, val_evaluator_cfg, val_loop_cfg = (
+      _build_single_dataset_loop_config(
+        opts=opts, loop_cls='ValLoop',
+        test_dataset_cfgs=dataset_cfgs['test'],
+        dataloader_kwargs=test_dataloader_kwargs,
+        evaluator_metrics=evaluator_metrics,
+      )
+    )
+    test_dataloader_cfg, test_evaluator_cfg, test_loop_cfg = (
+      _build_single_dataset_loop_config(
+        opts=opts, loop_cls='TestLoop',
+        test_dataset_cfgs=dataset_cfgs['test'],
+        dataloader_kwargs=test_dataloader_kwargs,
+        evaluator_metrics=evaluator_metrics,
+      )
+    )
+
+  # Data config
   if opts.mode == 'train':
     config_dict = dict(
-      train_dataloader=dict(dataset=dataset_cfgs['train'], **dataloader_kwargs),
-      train_cfg=dict(by_epoch=True, max_epochs=opts.max_epochs),
+      train_dataloader=train_dataloader_cfg,
+      train_cfg=train_loop_cfg,
     )
     if not opts.skip_test:
       config_dict.update(
-        val_dataloader=dict(dataset=dataset_cfgs['test'], **dataloader_kwargs),
-        val_cfg=dict(type='ValLoop'),
-        val_evaluator=evaluator_metrics,
+        val_dataloader=val_dataloader_cfg,
+        val_cfg=val_loop_cfg,
+        val_evaluator=val_evaluator_cfg,
       )
 
   if opts.mode == 'test':
     config_dict = dict(
-      test_dataloader=dict(dataset=dataset_cfgs['test'], **dataloader_kwargs),
-      test_cfg=dict(type='TestLoop'),
-      test_evaluator=evaluator_metrics,
+      test_dataloader=test_dataloader_cfg,
+      test_cfg=test_loop_cfg,
+      test_evaluator=test_evaluator_cfg,
     )
 
   return config_dict
@@ -231,7 +420,9 @@ def build_config(opts: argparse.Namespace):
 
   # Model config
   model_cfgs = ScriptEnv.load_config_dict('configs/model/gaze-dp.py')
-  config['model'] = model_cfgs['TdGazeNet']
+  if not opts.model_name in model_cfgs:
+    raise RuntimeError(f'Model "{opts.model_name}" not found in model configs.')
+  config['model'] = model_cfgs[opts.model_name]
 
   # Dataset, Evaluator and Loop config
   data_config_dict = build_data_config_dict(opts)
@@ -303,11 +494,31 @@ if __name__ == '__main__':
     description='model options for script.',
   )
 
+  model_group.add_argument(
+    '--model-name', required=True, choices=[
+      'TdGazeNet', 'TdGazeNetPlus',
+    ],
+    help='select model name for current run.',
+  )
+
   data_group = parser.add_argument_group(
     title='data options',
     description='data options for script.',
   )
 
+  data_group.add_argument(
+    '--data-name', required=True, choices=[
+      'default', 'extended', 'default+extended',
+    ],
+    help='select data name for current run.',
+  )
+  data_group.add_argument(
+    '--test-data-name', default='none', choices=[
+      'none', 'default+extended',
+      'default', 'extended',
+    ],
+    help='select test data name for current run.',
+  )
   data_group.add_argument(
     '--skip-test', action='store_true', default=False,
     help='skip validation data or test data for training process.',
@@ -327,6 +538,14 @@ if __name__ == '__main__':
   data_group.add_argument(
     '--batch-size', type=int, default=50,
     help='batch size for pytorch dataloader.',
+  )
+  data_group.add_argument(
+    '--max-gaze-angle', type=float, default=80.0,
+    help='maximum gaze angle, used for data validation (train).',
+  )
+  data_group.add_argument(
+    '--pupil-vis-thres', type=float, default=0.5,
+    help='pupil visibility threshold, used for data validation (train).',
   )
 
   config_group = parser.add_argument_group(

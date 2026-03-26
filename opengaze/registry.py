@@ -28,11 +28,11 @@ RUNNERS = Registry('runner', parent=MMENGINE_RUNNERS)
 # manage all kinds of loops like `EpochBasedTrainLoop`
 LOOPS = Registry('loop', parent=MMENGINE_LOOPS, locations=['opengaze.engine.runner.loops'])
 # manage all kinds of hooks like `CheckpointHook`
-HOOKS = Registry('hook', parent=MMENGINE_HOOKS, locations=['opengaze.engine.hook'])
+HOOKS = Registry('hook', parent=MMENGINE_HOOKS)
 
 # manage data-related modules
 DATASETS = Registry('dataset', parent=MMENGINE_DATASETS, locations=['opengaze.dataset'])
-DATA_SAMPLERS = Registry('data sampler', parent=MMENGINE_DATA_SAMPLERS)
+DATA_SAMPLERS = Registry('data sampler', parent=MMENGINE_DATA_SAMPLERS, locations=['opengaze.engine.sampler'])
 TRANSFORMS = Registry(
   'transform', parent=MMENGINE_TRANSFORMS,
   locations=[
@@ -57,9 +57,6 @@ PARAM_SCHEDULERS = Registry('parameter scheduler', parent=MMENGINE_PARAM_SCHEDUL
 METRICS = Registry('metric', parent=MMENGINE_METRICS, locations=['opengaze.metric'])
 # manage evaluator
 EVALUATOR = Registry('evaluator', parent=MMENGINE_EVALUATOR)
-
-# manage qconfig
-QCONFIGS = Registry('qconfig', locations=['opengaze.engine.quant'])
 
 # NOTE: this template does not define less commomly used modules
 # (listed below), whose locations are not specified for Registry

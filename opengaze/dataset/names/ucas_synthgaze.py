@@ -140,4 +140,9 @@ class SynthGaze(Dataset):
     return len(self.subjects_data)
 
   def __getitem__(self, idx):
-    return self.pipeline(self.subjects_data[idx])
+    while True:
+      try:  # Use infinite loop to guard against corrupted data
+        return self.pipeline(self.subjects_data[idx])
+      except Exception as ex:
+        min_idx, max_idx = 0, len(self.subjects_data) - 1
+        idx = random.randint(min_idx, max_idx)

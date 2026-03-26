@@ -26,19 +26,3 @@ AFFNet = dict(
   ),
   loss_cfg=dict(type='SmoothL1Loss'),
 )
-
-AFFNetD = dict(
-  type='AFFNetDWrapper',
-  model_cfg=dict(
-    type='AFFNetD',
-    init_cfg=[
-      dict(
-        type='Kaiming', mode='fan_in',
-        layer=['Conv2d', 'Linear'],
-      ),
-    ],
-  ),
-  loss_cfg=dict(type='SmoothL1Loss'),
-  x_limits=[-40.0, 40.0],
-  y_limits=[-40.0, 40.0],
-)

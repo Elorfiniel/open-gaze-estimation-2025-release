@@ -134,8 +134,29 @@ class GetFaceAndBBoxes(BaseTransform):
 
 @TRANSFORMS.register_module()
 class PrepareDataDictA(BaseTransform):
-  def __init__(self, image_size: int = 224):
+  def __init__(
+    self, image_size: int = 224,
+    max_gaze_angle: float = 80.0,
+    pupil_vis_thres: float = 0.5,
+  ) -> None:
     self.image_size = image_size
+    self.max_gaze_angle = max_gaze_angle
+    self.pupil_vis_thres = pupil_vis_thres
+
+  def _create_eyes_mask(self, gaze: np.ndarray, pupil_vis: np.ndarray):
+    neg_z = np.array([0.0, 0.0, -1.0])
+    dot = np.dot(gaze, neg_z)
+    m_g = np.linalg.norm(gaze)
+    sim = np.clip(dot / m_g, -1.0, 1.0)
+    deg = np.rad2deg(np.acos(sim))
+
+    vis = np.sum(pupil_vis) / len(pupil_vis)
+
+    mask_1 = 0.0 <= deg and deg <= self.max_gaze_angle
+    mask_2 = vis >= self.pupil_vis_thres
+    mask = 1.0 if mask_1 and mask_2 else 0.0
+
+    return torch.tensor([mask], dtype=torch.float32)
 
   def image_fn(self, image: Image):
     return TF.to_tensor(image)
@@ -169,6 +190,16 @@ class PrepareDataDictA(BaseTransform):
     data_dict.update(reye_bbox_crop=results['reye_bbox_crop'])
     data_dict.update(leye_bbox_crop=results['leye_bbox_crop'])
 
+    # Shape: (1, ), Mask for High Quality Eye Patches
+    data_dict['reye_mask'] = self._create_eyes_mask(
+      gaze=results['reye_vector'],
+      pupil_vis=results['reye_pupil_vis'],
+    )
+    data_dict['leye_mask'] = self._create_eyes_mask(
+      gaze=results['leye_vector'],
+      pupil_vis=results['leye_pupil_vis'],
+    )
+
     return data_dict
 
 
@@ -183,6 +214,8 @@ class PrepareDataDictB(BaseTransform):
       face_kpts=results['face_kpts'],
       eyes_kpts=results['eyes_kpts'],
       eyes_gaze=results['eyes_gaze'],
+      reye_mask=results['reye_mask'],
+      leye_mask=results['leye_mask'],
     )
 
     face_crop = TF.resize(
@@ -212,8 +245,12 @@ class PrepareDataDictB(BaseTransform):
 
 # Script Configuration
 def build_data_config_dict(opts: argparse.Namespace):
+  assert opts.data_name in ['default'], f'Invalid data name: {opts.data_name}'
+
   # Dataset config
   dataset_cfgs = ScriptEnv.load_config_dict('configs/dataset/ucas-synthgaze.py')
+  for subset in ['train', 'test']:
+    dataset_cfgs[subset] = dataset_cfgs[f'{subset}_{opts.data_name}']
 
   swap_file = ScriptEnv.resource_path('synthgaze/vertices-swap-pairs.json')
   pipeline = [
@@ -399,6 +436,11 @@ if __name__ == '__main__':
     description='data options for script.',
   )
 
+  data_group.add_argument(
+    '--data-name', required=True, default='default',
+    choices=['default'],
+    help='select data name for current run.',
+  )
   data_group.add_argument(
     '--skip-test', action='store_true', default=False,
     help='skip validation data or test data for training process.',
