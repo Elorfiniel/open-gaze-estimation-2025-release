@@ -443,23 +443,30 @@ def build_optim_dict(opts: argparse.Namespace):
   optim_wrapper_cls = 'AmpOptimWrapper' if opts.mixed_precision else 'OptimWrapper'
   optim_wrapper = dict(type=optim_wrapper_cls, optimizer=optimizer)
 
-  param_scheduler = [
-    dict(
-      type='LinearLR', by_epoch=True,
-      start_factor=opts.warm_up_ratio,
-      end_factor=1.0,
-      begin=0, end=opts.warn_up_epoch,
-      convert_to_iter_based=True,
-    ),
-    dict(
-      type='LinearLR', by_epoch=True,
-      start_factor=1.0,
-      end_factor=opts.cool_down_ratio,
-      begin=opts.cool_down_epoch,
-      end=opts.max_epochs,
-      convert_to_iter_based=True,
-    ),
-  ]
+  param_scheduler = []
+
+  if 0 <= opts.warm_up_epoch <= opts.max_epochs:
+    param_scheduler.append(
+      dict(
+        type='LinearLR', by_epoch=True,
+        start_factor=opts.warm_up_ratio,
+        end_factor=1.0,
+        begin=0, end=opts.warm_up_epoch,
+        convert_to_iter_based=True,
+      ),
+    )
+
+  if 0 <= opts.cool_down_epoch <= opts.max_epochs:
+    param_scheduler.append(
+      dict(
+        type='LinearLR', by_epoch=True,
+        start_factor=1.0,
+        end_factor=opts.cool_down_ratio,
+        begin=opts.cool_down_epoch,
+        end=opts.max_epochs,
+        convert_to_iter_based=True,
+      ),
+    )
 
   return dict(optim_wrapper=optim_wrapper, param_scheduler=param_scheduler)
 
@@ -592,7 +599,7 @@ if __name__ == '__main__':
     help='warm up ratio for learning rate scheduler.',
   )
   config_group.add_argument(
-    '--warn-up-epoch', type=float, default=1.00,
+    '--warm-up-epoch', type=float, default=1.00,
     help='warn up epoch for learning rate scheduler.',
   )
   config_group.add_argument(

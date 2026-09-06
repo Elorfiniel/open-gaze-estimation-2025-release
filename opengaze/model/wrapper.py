@@ -80,6 +80,8 @@ class TdGazeNetWrapper(BaseModel):
     gaze_origin_loss_cfg: dict,
     gaze_vector_loss_cfg: dict,
     loss_weight: dict,
+    skip_kpts_loss: bool = False,
+    skip_gaze_loss: bool = False,
   ) -> None:
     super(TdGazeNetWrapper, self).__init__()
 
@@ -98,9 +100,6 @@ class TdGazeNetWrapper(BaseModel):
       ]
     ])
 
-    self._plus = model_cfg['type'] == 'TdGazeNetPlus'
-    if self._plus: assert 'eyes_gate_loss' in loss_weight
-
     self.model: DataFnMixin = MODELS.build(model_cfg)
 
     self.face_kpts_loss = LOSSES.build(face_kpts_loss_cfg)
@@ -111,21 +110,20 @@ class TdGazeNetWrapper(BaseModel):
 
     self.loss_weight = loss_weight
 
+    self.skip_kpts_loss = skip_kpts_loss
+    self.skip_gaze_loss = skip_gaze_loss
+
   def _custom_forward(self, data_dict: dict):
     output = self.model(**self.model.data_fn(data_dict))
-    face_kpts, eyes_kpts, eyes_gaze = output[:3]
-    eyes_gate = output[3] if self._plus else None
-    return face_kpts, eyes_kpts, eyes_gaze, eyes_gate
+    face_kpts, eyes_kpts, eyes_gaze = output
+    return face_kpts, eyes_kpts, eyes_gaze
 
   def _custom_kpts_loss(
     self, loss_fn_name: str,
     pred: torch.Tensor, gold: torch.Tensor,
   ) -> torch.Tensor:
     loss_fn: Callable = getattr(self, loss_fn_name)
-    loss = loss_fn(pred[..., :3], gold).mean(dim=-1)
-    if self._plus:
-      loss_mu = (1.0 + loss) / torch.exp(pred[..., 3])
-      loss = pred[..., 3] + 0.5 * loss_mu
+    loss = loss_fn(pred, gold).mean(dim=-1)
     weight = self.loss_weight[loss_fn_name]
     return weight * loss.mean()
 
@@ -150,64 +148,56 @@ class TdGazeNetWrapper(BaseModel):
     return weight * loss.mean()
 
   def forward(self, mode='tensor', **data_dict):
-    face_kpts, eyes_kpts, eyes_gaze, eyes_gate = self._custom_forward(data_dict)
+    face_kpts, eyes_kpts, eyes_gaze = self._custom_forward(data_dict)
 
     if mode == 'loss':
-      face_kpts_loss = self._custom_kpts_loss(
-        loss_fn_name='face_kpts_loss',
-        pred=face_kpts, gold=data_dict['face_kpts'],
-      )
-      eyes_kpts_loss = self._custom_kpts_loss(
-        loss_fn_name='eyes_kpts_loss',
-        pred=eyes_kpts, gold=data_dict['eyes_kpts'],
-      )
+      loss_dict = dict()  # Loss Dictionary
 
-      reye_origin_loss = self._custom_gaze_loss(
-        loss_fn_name='gaze_origin_loss',
-        pred=eyes_gaze[:, 0, 0],
-        gold=data_dict['eyes_gaze'][:, 0, 0],
-        mask=data_dict['reye_mask'],
-      )
-      reye_vector_loss = self._custom_gaze_loss(
-        loss_fn_name='gaze_vector_loss',
-        pred=eyes_gaze[:, 0, 1],
-        gold=data_dict['eyes_gaze'][:, 0, 1],
-        mask=data_dict['reye_mask'],
-      )
-      leye_origin_loss = self._custom_gaze_loss(
-        loss_fn_name='gaze_origin_loss',
-        pred=eyes_gaze[:, 1, 0],
-        gold=data_dict['eyes_gaze'][:, 1, 0],
-        mask=data_dict['leye_mask'],
-      )
-      leye_vector_loss = self._custom_gaze_loss(
-        loss_fn_name='gaze_vector_loss',
-        pred=eyes_gaze[:, 1, 1],
-        gold=data_dict['eyes_gaze'][:, 1, 1],
-        mask=data_dict['leye_mask'],
-      )
+      if not self.skip_kpts_loss:
+        face_kpts_loss = self._custom_kpts_loss(
+          loss_fn_name='face_kpts_loss',
+          pred=face_kpts, gold=data_dict['face_kpts'],
+        )
+        eyes_kpts_loss = self._custom_kpts_loss(
+          loss_fn_name='eyes_kpts_loss',
+          pred=eyes_kpts, gold=data_dict['eyes_kpts'],
+        )
+        loss_dict.update(
+          face_kpts_loss=face_kpts_loss,
+          eyes_kpts_loss=eyes_kpts_loss,
+        )
 
-      gaze_origin_loss = (reye_origin_loss + leye_origin_loss) / 2
-      gaze_vector_loss = (reye_vector_loss + leye_vector_loss) / 2
-
-      loss_dict = dict(
-        face_kpts_loss=face_kpts_loss,
-        eyes_kpts_loss=eyes_kpts_loss,
-        gaze_origin_loss=gaze_origin_loss,
-        gaze_vector_loss=gaze_vector_loss,
-      )
-
-      if self._plus:
-        reye_gate_loss = self._custom_gate_loss(
-          pred=eyes_gate[:, 0],
+      if not self.skip_gaze_loss:
+        reye_origin_loss = self._custom_gaze_loss(
+          loss_fn_name='gaze_origin_loss',
+          pred=eyes_gaze[:, 0, 0],
+          gold=data_dict['eyes_gaze'][:, 0, 0],
           mask=data_dict['reye_mask'],
         )
-        leye_gate_loss = self._custom_gate_loss(
-          pred=eyes_gate[:, 1],
+        reye_vector_loss = self._custom_gaze_loss(
+          loss_fn_name='gaze_vector_loss',
+          pred=eyes_gaze[:, 0, 1],
+          gold=data_dict['eyes_gaze'][:, 0, 1],
+          mask=data_dict['reye_mask'],
+        )
+        leye_origin_loss = self._custom_gaze_loss(
+          loss_fn_name='gaze_origin_loss',
+          pred=eyes_gaze[:, 1, 0],
+          gold=data_dict['eyes_gaze'][:, 1, 0],
           mask=data_dict['leye_mask'],
         )
-        eyes_gate_loss = (reye_gate_loss + leye_gate_loss) / 2
-        loss_dict['eyes_gate_loss'] = eyes_gate_loss
+        leye_vector_loss = self._custom_gaze_loss(
+          loss_fn_name='gaze_vector_loss',
+          pred=eyes_gaze[:, 1, 1],
+          gold=data_dict['eyes_gaze'][:, 1, 1],
+          mask=data_dict['leye_mask'],
+        )
+        gaze_origin_loss = (reye_origin_loss + leye_origin_loss) / 2
+        gaze_vector_loss = (reye_vector_loss + leye_vector_loss) / 2
+        loss_dict.update(
+          gaze_origin_loss=gaze_origin_loss,
+          gaze_vector_loss=gaze_vector_loss,
+        )
 
       return dict(**loss_dict, loss=sum(loss_dict.values()))
 
@@ -232,15 +222,6 @@ class TdGazeNetWrapper(BaseModel):
         leye_vector=data_dict['eyes_gaze'][:, 1, 1],
       )
 
-      if self._plus:
-        pred_dict['face_kpts_log_variance'] = face_kpts[..., 3]
-        pred_dict['reye_kpts_log_variance'] = eyes_kpts[:, 0, :, 3]
-        pred_dict['leye_kpts_log_variance'] = eyes_kpts[:, 1, :, 3]
-        pred_dict['reye_gate'] = F.sigmoid(eyes_gate[:, 0])
-        pred_dict['leye_gate'] = F.sigmoid(eyes_gate[:, 1])
-        gold_dict['reye_gate'] = data_dict['reye_mask']
-        gold_dict['leye_gate'] = data_dict['leye_mask']
-
       return pred_dict, gold_dict
 
-    return face_kpts, eyes_kpts, eyes_gaze, eyes_gate
+    return face_kpts, eyes_kpts, eyes_gaze

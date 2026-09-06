@@ -25,12 +25,15 @@ class RandomCameraRotate3D(BaseTransform):
 
   def __init__(self, camera_roll: float, safe_margin: float,
                rotate_along_camera_x_axis: bool = True,
-               rotate_along_camera_y_axis: bool = True):
+               rotate_along_camera_y_axis: bool = True,
+               skip_image_transformations: bool = False):
     self.camera_roll = camera_roll
     self.safe_margin = safe_margin
 
     self.rotate_along_camera_x_axis = rotate_along_camera_x_axis
     self.rotate_along_camera_y_axis = rotate_along_camera_y_axis
+
+    self.skip_image_transformations = skip_image_transformations
 
   def _unit_vector(self, vector: np.ndarray):
     return vector / np.linalg.norm(vector)
@@ -168,8 +171,8 @@ class RandomCameraRotate3D(BaseTransform):
 
     return image_coords.T
 
-  def points_2d_visibility(self, image: np.ndarray, points_2d: np.ndarray):
-    image_h, image_w, c = image.shape
+  def points_2d_visibility(self, points_2d: np.ndarray, dsize: tuple):
+    image_w, image_h = dsize
     return np.logical_and(
       np.logical_and(points_2d[:, 0] >= 0, points_2d[:, 0] < image_w),
       np.logical_and(points_2d[:, 1] >= 0, points_2d[:, 1] < image_h),
@@ -190,8 +193,10 @@ class RandomCameraRotate3D(BaseTransform):
     # Apply perspective warping on the pre-rendered image
     M = results['intrinsic_actual'] @ M @ np.linalg.inv(results['intrinsic_render'])
     dsize = [2 * int(s) for s in results['intrinsic_actual'][:2, 2]]
-    image = cv2.warpPerspective(results['image'], M, dsize, flags=cv2.INTER_CUBIC)
-    updated_results.update(image=image)
+
+    if not self.skip_image_transformations:
+      image = cv2.warpPerspective(results['image'], M, dsize, flags=cv2.INTER_CUBIC)
+      updated_results.update(image=image)
 
     # Project gaze-related annots to rotated camera space
     reye_origin, reye_vector = self.project_gaze(
@@ -227,7 +232,7 @@ class RandomCameraRotate3D(BaseTransform):
       updated_results[f'{landmark_name}_2d'] = points_2d
 
       if f'{landmark_name}_vis' in results:
-        points_2d_vis = self.points_2d_visibility(image, points_2d)
+        points_2d_vis = self.points_2d_visibility(points_2d, dsize)
         updated_results[f'{landmark_name}_vis'] = np.logical_and(
           results[f'{landmark_name}_vis'], points_2d_vis,
         )
@@ -240,10 +245,11 @@ class RandomHFlip2D(BaseTransform):
 
   LANDMARK_GROUPS_NAME = _UCAS_SYNTHGAZE_LANDMARK_GROUPS_NAME.copy()
 
-  def __init__(self, swap_file: str, p_hflip: float = 0.5):
+  def __init__(self, swap_file: str, p_hflip: float = 0.5, skip_images: bool = False):
     assert osp.isfile(swap_file) and 0 <= p_hflip <= 1
     self.swap_file = swap_file
     self.p_hflip = p_hflip
+    self.skip_images = skip_images
     self._load_swap_data()
 
   def _load_swap_data(self, force: bool = False):
@@ -323,7 +329,8 @@ class RandomHFlip2D(BaseTransform):
 
   def transform(self, results: dict):
     if random.random() < self.p_hflip:
-      results['image'] = cv2.flip(results['image'], flipCode=1)
+      if not self.skip_images:
+        results['image'] = cv2.flip(results['image'], flipCode=1)
 
       results['reye_origin'], results['leye_origin'] = (
         self._flip_points_3d(results['leye_origin']),
@@ -333,6 +340,7 @@ class RandomHFlip2D(BaseTransform):
         self._flip_vector_3d(results['leye_vector']),
         self._flip_vector_3d(results['reye_vector']),
       )
+
       results['gaze_target'] = self._flip_points_3d(results['gaze_target'])
 
       results['head_o'], results['head_ox'], results['head_oy'], results['head_oz'] = (
@@ -342,9 +350,9 @@ class RandomHFlip2D(BaseTransform):
         self._flip_vector_3d(results['head_oz']),
       )
 
-      image_h, image_w, c = results['image'].shape
       update_dict = dict()  # Changed landmarks
 
+      image_w = 2 * int(results['intrinsic_actual'][0, 2])
       for landmark_name in self.LANDMARK_GROUPS_NAME:
         if f'{landmark_name}_3d' in results:
           points_3d, tgt_mesh = self._flip_mesh_3d(

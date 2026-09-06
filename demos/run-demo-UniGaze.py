@@ -5,19 +5,20 @@ from opengaze.runtime.time import TimeViaEMA
 from opengaze.utils import MpiiDataNormalizer, FaceBoundingBox, SparseFaceLandmarks
 from opengaze.utils.euler import gaze_2d_3d_a
 from opengaze.utils.geom import PoseEstimator
-from opengaze.model.gaze_3d import XGaze224
 
 from PIL import Image
 from typing import Callable
 
 import argparse
 import cv2
-import collections
 import json
 import numpy as np
 import os.path as osp
 import torch
+import torch.nn as nn
 import torchvision.transforms.functional as TF
+
+import unigaze
 
 
 # Utils for this demo script, not intended for other scripts
@@ -71,14 +72,14 @@ class HeadPoseEstimator(PoseEstimator):
 
 
 class FrameConsumer:
-  def __call__(self, src_image: np.ndarray, set_exit_cond: Callable, model: XGaze224):
+  def __call__(self, src_image: np.ndarray, set_exit_cond: Callable, model: nn.Module):
     result_dict = self.process(src_image, model)
     exit_cond = self.display(result_dict)
     set_exit_cond(exit_cond)
     return result_dict, exit_cond
 
   def __init__(self, demo_data: dict, face_bbox: FaceBoundingBox, device: torch.device):
-    self.name = 'XGaze224 Demo'
+    self.name = 'UniGaze Demo'
 
     self.demo_data = demo_data
     self.face_bbox = face_bbox
@@ -164,11 +165,11 @@ class FrameConsumer:
     face = TF.normalize(face, **self.norm_params)
     return dict(face=face)
 
-  def _model_inference(self, model: XGaze224, data_dict: dict):
+  def _model_inference(self, model: nn.Module, data_dict: dict):
     data_dict = {k:v.to(self.device) for k, v in data_dict.items()}
     with torch.no_grad():
-      model_outputs = model(**data_dict)
-    return dict(gaze=model_outputs[0].to('cpu'))
+      model_outputs = model(data_dict['face'])
+    return dict(gaze=model_outputs['pred_gaze'][0].to('cpu'))
 
   def _project_points_to_image(self, points_3d: np.ndarray):
     # Project 3D points from real camera space to real image space
@@ -220,7 +221,7 @@ class FrameConsumer:
 
     return proc_dict
 
-  def process(self, frame: np.ndarray, model: XGaze224):
+  def process(self, frame: np.ndarray, model: nn.Module):
     frame = cv2.undistort(frame, self.real_intrinsic, self.real_dist_coef)
 
     self.time.tick(tag='face-bbox')
@@ -334,7 +335,7 @@ class ImageCaptureHandler(CaptureHandler):
 
 
 class ImageFrameConsumer(FrameConsumer):
-  def __call__(self, src_image: np.ndarray, set_exit_cond: Callable, model: XGaze224):
+  def __call__(self, src_image: np.ndarray, set_exit_cond: Callable, model: nn.Module):
     result_dict = self.process(src_image, model)
 
     if not self.headless:
@@ -358,7 +359,7 @@ class ImageFrameConsumer(FrameConsumer):
     images_folder = osp.abspath(osp.dirname(image_sequence))
     self.results_path = osp.join(
       osp.dirname(images_folder),
-      'XGaze224-results.jsonl',
+      'UniGaze-results.jsonl',
     )
     self.headless = headless
 
@@ -383,24 +384,15 @@ class ImageFrameConsumer(FrameConsumer):
 
 
 # Entrypoint, Arguments and Top-Level Utilities
-def load_wrapped_model(demo_data: dict, state_dict_file: str, device: torch.device):
-  model = XGaze224().to(device=device)
-
-  state_dict = torch.load(state_dict_file, map_location=device)
-  params = collections.OrderedDict()
-  for key in state_dict:
-    param_key = key.removeprefix('model.')
-    params[param_key] = state_dict[key]
-  model.load_state_dict(params, strict=False)
-
-  return model.eval()
+def load_wrapped_model(demo_data: dict, model_name: str, device: torch.device):
+  return unigaze.load(model_name, device=device)
 
 
 def main_procedure(opts: argparse.Namespace):
   demo_data = _load_demo_data(opts.demo_data)
   model = load_wrapped_model(
     demo_data,
-    state_dict_file=opts.state_dict_file,
+    model_name=opts.model_name,
     device=torch.device(opts.device),
   )
 
@@ -428,7 +420,7 @@ def main_procedure(opts: argparse.Namespace):
 
 
 if __name__ == '__main__':
-  parser = argparse.ArgumentParser(description='run demo for XGaze224 model.')
+  parser = argparse.ArgumentParser(description='run demo for UniGaze model.')
 
   parser.add_argument(
     '--demo-data', type=str, default='',
@@ -449,8 +441,14 @@ if __name__ == '__main__':
   )
 
   model_group.add_argument(
-    '--state-dict-file', type=str, required=True,
-    help='state dict file extracted from mmengine checkpoint.',
+    '--model-name', type=str, required=True,
+    choices=[
+      'unigaze_b16_joint',
+      'unigaze_l16_joint',
+      'unigaze_h14_joint',
+      'unigaze_h14_cross_X',
+    ],
+    help='name of the pretrained unigaze model.',
   )
   model_group.add_argument(
     '--device', type=str, default='cpu',

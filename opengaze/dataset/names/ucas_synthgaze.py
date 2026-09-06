@@ -54,11 +54,13 @@ def _load_annots_for_target(subject_folder: str, target_idx: int):
 
 
 class _SynthGazeSubjectData(Dataset):
-  def __init__(self, root: str, subject: str):
+  def __init__(self, root: str, subject: str, skip_images: bool = False):
     super(_SynthGazeSubjectData, self).__init__()
 
     self.subject_folder = osp.join(root, subject)
     self._info = dict(root=root, subject=subject)
+
+    self._skip_images = skip_images
 
     self.hparams = _load_subject_hparams(self.subject_folder)
     self.annots = [
@@ -79,13 +81,8 @@ class _SynthGazeSubjectData(Dataset):
 
   def __getitem__(self, idx):
     target_idx, view_idx = idx // self.n_views, idx % self.n_views
-    image_path = osp.join(
-      self.subject_folder, f'target-{target_idx + 1:06d}',
-      'images', f'{view_idx + 1:04d}.jpg',
-    )
 
     data = dict(
-      image=cv2.imread(image_path, flags=cv2.IMREAD_UNCHANGED),
       intrinsic_actual=self.annots[target_idx]['intrinsic_actual'],
       intrinsic_render=self.annots[target_idx]['intrinsic_render'],
       head_pose=self.annots[target_idx]['head_pose'],
@@ -105,6 +102,13 @@ class _SynthGazeSubjectData(Dataset):
       subject_idx=int(self._info['subject']),
       target_idx=target_idx, view_idx=view_idx,
     )
+
+    if not self._skip_images:
+      image_path = osp.join(
+        self.subject_folder, f'target-{target_idx + 1:06d}',
+        'images', f'{view_idx + 1:04d}.jpg',
+      )
+      data.update(image=cv2.imread(image_path, flags=cv2.IMREAD_UNCHANGED))
 
     return data
 
@@ -126,10 +130,13 @@ def _create_subset(dataset: Dataset, subset: Union[int, float]):
 @DATASETS.register_module()
 class SynthGaze(Dataset):
   def __init__(self, root: str, subjects: list, pipeline: Sequence[Union[Callable, Dict]],
-               subset: Optional[Union[int, float]] = None):
+               subset: Optional[Union[int, float]] = None, skip_images: bool = False):
     super(SynthGaze, self).__init__()
 
-    _subjects_data = [_SynthGazeSubjectData(root, subject) for subject in subjects]
+    _subjects_data = [
+      _SynthGazeSubjectData(root, subject, skip_images=skip_images)
+      for subject in subjects
+    ]
     if subset is not None:
       _subjects_data = [_create_subset(d, subset) for d in _subjects_data]
     self.subjects_data = ConcatDataset(_subjects_data)

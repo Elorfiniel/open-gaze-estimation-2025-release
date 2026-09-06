@@ -4,31 +4,26 @@ An unofficial implementation for several gaze estimation algorithms, trained on 
 
 ## Installation
 
-Follow these steps to get started:
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) (requires uv >= 0.9). Follow these steps to get started:
 
-1. Create a python virtual environment for dependencies (optional).
-
-    ```shell
-    python -m venv --upgrade-deps open-gaze
-
-    open-gaze/Scripts/activate.bat # (windows: cmd)
-    open-gaze/Scripts/Activate.ps1 # (windows: pwsh)
-    source open-gaze/bin/activate  # (linux / mac)
-    ```
-
-2. Install the dependencies.
+1. Install the dependencies and the `opengaze` package (CPU torch by default).
 
     ```shell
-    pip install -r requirements.txt
+    uv sync
     ```
 
-3. Install the `opengaze` package in development mode.
+    This creates a `.venv` from the committed `uv.lock` (Python 3.10 - 3.14). Run scripts with `uv run`, e.g. `uv run python <script>`.
+
+2. For a GPU (CUDA) environment, create the environment via the `uv pip` interface and let uv auto-detect your NVIDIA driver to pick matching prebuilt torch wheels:
 
     ```shell
-    pip install --editable .
+    uv venv
+    uv pip install --torch-backend=auto -e .
     ```
 
-4. Download external resources following these [instructions](resource/README.md).
+    Use `--torch-backend=cu130` instead of `auto` to pin a specific CUDA version for reproducibility.
+
+3. Download external resources following these [instructions](resource/README.md).
 
 ## Quickstart
 

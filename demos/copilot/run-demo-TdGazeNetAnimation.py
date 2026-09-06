@@ -688,6 +688,12 @@ class FrameConsumer:
     )
     proc_dict.update(reye_target_2d=reye_target_2d, leye_target_2d=leye_target_2d)
 
+    # Initialize gaze coordinates with default values (will be overwritten by actual computation)
+    reye_gaze_c = np.zeros(3, dtype=np.float32)
+    reye_gaze_s = np.zeros(2, dtype=np.float32)
+    leye_gaze_c = np.zeros(3, dtype=np.float32)
+    leye_gaze_s = np.zeros(2, dtype=np.float32)
+
     if self.gaze_source == 'gaze':
       reye_gaze_c, reye_gaze_s = self._point_of_gaze(
         origin=output_dict['reye_origin_3d'],
@@ -740,6 +746,10 @@ class FrameConsumer:
 
     # Update PoG position from model output
     # Average of left and right eye PoGs
+    # Defensive check: ensure gaze data exists
+    if 'reye_gaze_s' not in proc_dict or 'leye_gaze_s' not in proc_dict:
+      return dict(success=False, frame=frame, message='Gaze computation failed.')
+
     avg_gaze_s = (proc_dict['reye_gaze_s'] + proc_dict['leye_gaze_s']) / 2
     self.pog_pos = avg_gaze_s
 
@@ -911,6 +921,9 @@ class FrameConsumer:
     y_start = self.screen_h - 130
     line_height = 25
 
+    # Initialize y_offset before conditional block to prevent UnboundLocalError
+    y_offset = y_start
+
     if result_dict.get('success', False):
       # Pipeline metrics
       metrics = [
@@ -919,7 +932,6 @@ class FrameConsumer:
         f'Nasal Dist: {result_dict.get("nasal_distance", 0):.2f} mm',
       ]
 
-      y_offset = y_start
       for text in metrics:
         cv2.putText(
           canvas,
